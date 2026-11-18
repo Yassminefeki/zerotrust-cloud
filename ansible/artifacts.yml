@@ -1,0 +1,35 @@
+# Runs on the i5: fetch what the isolated VMs cannot download themselves, and create the
+# secrets (random, 0600, gitignored) before any VM needs them.
+- name: Artifacts and secrets on the CLOUD host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Artifact and secret directories exist (private)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: ["{{ zt_artifacts }}", "{{ zt_secrets }}"]
+
+    - name: Download step-cli and step-ca packages once
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ zt_artifacts }}/{{ item.name }}"
+        mode: "0644"
+        timeout: 120
+      loop:
+        - {name: step-cli_amd64.deb, url: "{{ step_cli_deb_url }}"}
+        - {name: step-ca_amd64.deb, url: "{{ step_ca_deb_url }}"}
+
+    - name: Generate CA secrets (key password, provisioner password) if missing
+      ansible.builtin.set_fact:
+        _gen: "{{ lookup('ansible.builtin.password', zt_secrets ~ '/' ~ item ~ ' length=40 chars=ascii_letters,digits') }}"
+      loop: [ca_key_password, ca_provisioner_password]
+      no_log: true
+
+    - name: Secrets are private
+      ansible.builtin.file:
+        path: "{{ zt_secrets }}/{{ item }}"
+        mode: "0600"
+      loop: [ca_key_password, ca_provisioner_password]

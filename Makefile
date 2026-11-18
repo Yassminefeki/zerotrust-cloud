@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait recreate-vms test-2 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait recreate-vms test-2 ca test-3 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -73,11 +73,18 @@ test-2: venv gen  ## stage 2: networks, VMs, IPs, routes, isolation, apt cache
 	sudo -v
 	$(PYTEST) tests/infra -v
 
-# ------------------------------------------------- full pipeline (filled in by later stages) --
-up: host infra  ## build everything (stages 1-7)
-	@echo ">> stages 3-7 not implemented yet."
+# ---------------------------------------------------------------- stage 3 --
+ca: gen  ## stage 3: step-ca on the CA VM (downloads step packages once on the i5)
+	$(ANSIBLE) ansible-playbook ca.yml
 
-test: test-0 test-1 test-2  ## run every test
+test-3: venv gen  ## stage 3: CA service, TLS 1.3, policy, 24h issuance, refusals
+	$(PYTEST) tests/ca -v
+
+# ------------------------------------------------- full pipeline (filled in by later stages) --
+up: host infra ca  ## build everything (stages 1-7)
+	@echo ">> stages 4-7 not implemented yet."
+
+test: test-0 test-1 test-2 test-3  ## run every test
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
 	$(TF) destroy -input=false -auto-approve $(TFVARS)

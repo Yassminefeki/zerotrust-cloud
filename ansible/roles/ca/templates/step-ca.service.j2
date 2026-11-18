@@ -1,0 +1,43 @@
+# {{ ansible_managed }}
+[Unit]
+Description=step-ca internal CA ({{ zt_pki.trust_domain }})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User={{ step_user }}
+Group={{ step_user }}
+Environment=STEPPATH={{ step_path }}
+WorkingDirectory={{ step_path }}
+ExecStart=/usr/bin/step-ca {{ step_path }}/config/ca.json --password-file {{ step_path }}/secrets/password
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the CA only needs its own directory and one unprivileged port.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths={{ step_path }}/db
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -285,3 +285,20 @@ def test_ssh_config_and_inventory(build, env):
 
 def test_public_key_required(env):
     assert gen_rules.validate_env(dict(env, ssh_public_key_file="~/.ssh/id_ed25519"))
+
+
+# ------------------------------------------------------------- stage 3: PKI --
+def test_pki_identities_and_ca_policy(build):
+    pki = json.loads((build / "pki/pki.json").read_text())
+    assert pki["ca"]["url"] == "https://10.50.0.10:9000" and pki["lifetime"] == "24h"
+    ids = pki["identities"]
+    # only nodes that take part in mTLS get a cert; never the gateway or the CA itself
+    assert set(ids) == {"frontend", "service-a", "service-b", "database", "client-i7", "client-test-peer"}
+    assert ids["service-b"]["uri"] == "spiffe://cloud.local/service-b"
+    assert ids["service-b"]["ips"] == ["10.30.0.12", "10.40.0.11"], "data-plane IPs only, no mgmt"
+    assert ids["client-i7"]["uri"] == "spiffe://cloud.local/client/i7" and ids["client-i7"]["ips"] == []
+    allow = pki["x509_policy"]["allow"]
+    assert allow["uri"] == ["cloud.local"]
+    assert "10.50.0.20" not in allow["ip"], "no mgmt address may ever be certified"
+    assert sorted(allow["dns"]) == sorted(i["cn"] for i in ids.values())
+    assert pki["x509_policy"]["allowWildcardNames"] is False

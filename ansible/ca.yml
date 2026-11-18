@@ -1,0 +1,10 @@
+# Stage 3 — internal CA (step-ca) on VM6. `make ca`
+- name: Artifacts and secrets
+  ansible.builtin.import_playbook: artifacts.yml
+
+- name: Internal CA
+  hosts: ca
+  become: true
+  gather_facts: true
+  roles:
+    - ca

@@ -511,6 +511,53 @@ def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
     return out
 
 
+def client_cn(uri: str) -> str:
+    """spiffe://cloud.local/client/i7 -> client-i7 (CNs must be valid DNS labels for the CA policy)."""
+    return uri.split("://", 1)[1].split("/", 1)[1].replace("/", "-")
+
+
+def render_pki(policy: dict, rules: list[Rule]) -> dict:
+    """Every identity the CA may ever sign, and the issuance policy that enforces it.
+    Nodes get a cert only if they take part in an mTLS flow (gateway and CA do not)."""
+    nets = policy["networks"]
+    ca_svc = policy["services"]["step-ca"]
+    ca_ip = policy["nodes"][ca_svc["node"]]["interfaces"][ca_svc["network"]]
+    mtls_nodes = sorted({r.dst.name for r in rules if r.mtls and r.dst.kind == "node"} |
+                        {r.src.name for r in rules if r.mtls and r.src.kind == "node"})
+    identities = {}
+    for n in mtls_nodes:
+        # IP SANs: the node's data-plane addresses (never mgmt/wan: no mTLS there)
+        ips = [ip for net, ip in policy["nodes"][n]["interfaces"].items()
+               if net not in ("mgmt", "wan", "tunnel")]
+        identities[n] = {"cn": n, "uri": spiffe(policy, n), "dns": [n], "ips": ips, "kind": "node"}
+    for r in rules:
+        if r.mtls and r.src.kind == "principal":
+            for uri in r.allowed_ids:
+                cn = client_cn(uri)
+                identities[cn] = {"cn": cn, "uri": uri, "dns": [cn], "ips": [], "kind": "client"}
+    all_ips = sorted({ip for i in identities.values() for ip in i["ips"]},
+                     key=lambda x: ipaddress.ip_address(x))
+    return {
+        "trust_domain": policy["trust_domain"],
+        "ca": {"node": ca_svc["node"], "ip": ca_ip, "port": ca_svc["port"],
+               "url": f"https://{ca_ip}:{ca_svc['port']}", "provisioner": "zt-jwk",
+               "name": f"{policy['trust_domain']} internal CA"},
+        "lifetime": policy["cert"]["lifetime"],
+        "renew_before": policy["cert"]["renew_before"],
+        "min_tls": policy["cert"]["min_tls"],
+        "identities": identities,
+        # ca.json -> authority.policy.x509 : anything else is refused by the CA itself
+        "x509_policy": {
+            "allow": {
+                "uri": [policy["trust_domain"]],          # URI rules match the URI host
+                "dns": sorted(i["cn"] for i in identities.values()),  # CNs are checked as DNS names
+                "ip": all_ips,
+            },
+            "allowWildcardNames": False,
+        },
+    }
+
+
 def _mac(net_index: int, node_id: int) -> str:
     return f"52:54:00:5a:{net_index:02x}:{node_id:02x}"
 
@@ -644,6 +691,7 @@ def generate(policy: dict, env: dict, out: Path) -> dict[str, str]:
     files["terraform.tfvars.json"] = json.dumps(render_tfvars(policy, env), indent=2) + "\n"
     files["inventory.yml"] = GENERATED_HEADER + yaml.safe_dump(render_inventory(policy, env), sort_keys=False)
     files["ssh_config"] = render_ssh_config(policy, env)
+    files["pki/pki.json"] = json.dumps(render_pki(policy, rules), indent=2) + "\n"
     files["matrix.json"] = json.dumps(render_matrix(policy, rules), indent=2) + "\n"
     files["flows.json"] = json.dumps([asdict(r) for r in rules], indent=2) + "\n"
     for rel, text in files.items():

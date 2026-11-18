@@ -1,0 +1,168 @@
+---
+# step-ca on the CA VM: listens on mgmt only, TLS 1.3 only, 24h leaf certificates,
+# and an issuance policy (generated from policy.yaml) that refuses any other name.
+
+# ------------------------------------------------------------------ packages --
+- name: Package cache directory
+  ansible.builtin.file:
+    path: /var/cache/zerotrust
+    state: directory
+    mode: "0755"
+
+- name: Copy step packages (downloaded on the i5; the VM has no internet)
+  ansible.builtin.copy:
+    src: "{{ zt_artifacts }}/{{ item }}"
+    dest: "/var/cache/zerotrust/{{ item }}"
+    mode: "0644"
+  loop: [step-cli_amd64.deb, step-ca_amd64.deb]
+
+- name: Install step-cli and step-ca (no-op when the same version is installed)
+  ansible.builtin.apt:
+    deb: "/var/cache/zerotrust/{{ item }}"
+  loop: [step-cli_amd64.deb, step-ca_amd64.deb]
+
+- name: Find the step CLI binary
+  ansible.builtin.shell: command -v step || command -v step-cli
+  args:
+    executable: /bin/bash
+  register: ca_step_bin
+  changed_when: false
+
+# ---------------------------------------------------------------- user, dirs --
+- name: System user for step-ca
+  ansible.builtin.user:
+    name: "{{ step_user }}"
+    system: true
+    home: "{{ step_path }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: STEPPATH and secrets directories (private)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ step_user }}"
+    group: "{{ step_user }}"
+    mode: "0700"
+  loop: ["{{ step_path }}", "{{ step_path }}/secrets"]
+
+- name: Key and provisioner passwords (generated on the i5, 0400 here)
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.file', zt_secrets ~ '/' ~ item.src) }}"
+    dest: "{{ step_path }}/secrets/{{ item.dest }}"
+    owner: "{{ step_user }}"
+    group: "{{ step_user }}"
+    mode: "0400"
+  loop:
+    - {src: ca_key_password, dest: password}
+    - {src: ca_provisioner_password, dest: provisioner-password}
+  no_log: true
+
+# --------------------------------------------------------------------- init --
+- name: Initialise the PKI (root + intermediate + JWK provisioner), once
+  ansible.builtin.command:
+    argv:
+      - "{{ ca_step_bin.stdout }}"
+      - ca
+      - init
+      - --deployment-type=standalone
+      - "--name={{ zt_pki.ca.name }}"
+      - "--dns={{ zt_pki.ca.ip }}"
+      - "--dns={{ zt_pki.ca.node }}"
+      - "--address={{ zt_pki.ca.ip }}:{{ zt_pki.ca.port }}"
+      - "--provisioner={{ zt_pki.ca.provisioner }}"
+      - "--password-file={{ step_path }}/secrets/password"
+      - "--provisioner-password-file={{ step_path }}/secrets/provisioner-password"
+    creates: "{{ step_path }}/config/ca.json"
+  environment:
+    STEPPATH: "{{ step_path }}"
+
+- name: Everything under STEPPATH belongs to the step user
+  ansible.builtin.file:
+    path: "{{ step_path }}"
+    owner: "{{ step_user }}"
+    group: "{{ step_user }}"
+    recurse: true
+
+# --------------------------------------------------- config from policy.yaml --
+- name: Read the generated ca.json
+  ansible.builtin.slurp:
+    src: "{{ step_path }}/config/ca.json"
+  register: ca_json_raw
+
+- name: Merge lifetime, TLS 1.3-only and the issuance policy into ca.json
+  ansible.builtin.copy:
+    content: "{{ (ca_json_raw.content | b64decode | from_json) | combine(ca_overrides, recursive=True) | to_nice_json(indent=2) }}\n"
+    dest: "{{ step_path }}/config/ca.json"
+    owner: "{{ step_user }}"
+    group: "{{ step_user }}"
+    mode: "0600"
+  vars:
+    ca_overrides:
+      address: "{{ zt_pki.ca.ip }}:{{ zt_pki.ca.port }}"   # mgmt only, never 0.0.0.0
+      authority:
+        claims:
+          minTLSCertDuration: 5m
+          maxTLSCertDuration: "{{ zt_pki.lifetime }}"
+          defaultTLSCertDuration: "{{ zt_pki.lifetime }}"
+          disableRenewal: false
+          allowRenewalAfterExpiry: false
+        policy:
+          x509: "{{ zt_pki.x509_policy }}"
+      tls:
+        minVersion: 1.3
+        maxVersion: 1.3
+  notify: Restart step-ca
+
+# ------------------------------------------------------------------ service --
+- name: Database directory exists before start (systemd ReadWritePaths= requires it)
+  ansible.builtin.file:
+    path: "{{ step_path }}/db"
+    state: directory
+    owner: "{{ step_user }}"
+    group: "{{ step_user }}"
+    mode: "0700"
+
+- name: Hardened systemd unit for step-ca
+  ansible.builtin.template:
+    src: step-ca.service.j2
+    dest: /etc/systemd/system/step-ca.service
+    mode: "0644"
+  notify: Restart step-ca
+
+- name: Step-ca enabled and running
+  ansible.builtin.systemd_service:
+    name: step-ca
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply config changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the CA on the mgmt address
+  ansible.builtin.wait_for:
+    host: "{{ zt_pki.ca.ip }}"
+    port: "{{ zt_pki.ca.port }}"
+    timeout: 60
+
+# --------------------------------------------- export the trust anchor to i5 --
+- name: Root certificate fingerprint
+  ansible.builtin.command:
+    argv: ["{{ ca_step_bin.stdout }}", certificate, fingerprint, "{{ step_path }}/certs/root_ca.crt"]
+  register: ca_fingerprint
+  changed_when: false
+
+- name: Fetch the root certificate to build/pki/
+  ansible.builtin.fetch:
+    src: "{{ step_path }}/certs/root_ca.crt"
+    dest: "{{ zt_build }}/pki/root_ca.crt"
+    flat: true
+
+- name: Store the root fingerprint next to it
+  ansible.builtin.copy:
+    content: "{{ ca_fingerprint.stdout | trim }}\n"
+    dest: "{{ zt_build }}/pki/root_ca.fingerprint"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
