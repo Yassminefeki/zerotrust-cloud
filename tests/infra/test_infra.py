@@ -164,3 +164,15 @@ def test_apt_cache_reachable_over_mgmt(vm, tf, name):
 def test_apt_update_through_cache(vm):
     r = vm("ca").run("sudo apt-get -o Acquire::Retries=1 update -q")
     assert r.rc == 0, r.stderr
+
+
+@pytest.mark.parametrize("name", NODES)
+def test_disk_is_file_backed_qcow2_and_confined(env, tf, name):
+    """The XSLT in vms.tf must turn the pool volume into a file disk (so virt-aa-helper can
+    confine it) while keeping the qcow2 driver (raw would let a guest forge a backing file)."""
+    xml = virsh(env, "dumpxml", f"zt-{name}")
+    disk = re.search(r"<disk type='(\w+)' device='disk'>(.*?)</disk>", xml, re.S)
+    assert disk and disk.group(1) == "file", "system disk must be type='file'"
+    assert "type='qcow2'" in disk.group(2)
+    assert f"{tf['pool_path']}/zt-{name}.qcow2" in disk.group(2)
+    assert re.search(r"<seclabel type='dynamic' model='apparmor'", xml), "AppArmor must confine the VM"

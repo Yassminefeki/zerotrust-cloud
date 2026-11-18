@@ -129,6 +129,35 @@ resource "libvirt_domain" "vm" {
     target_type = "serial"
     target_port = "0"
   }
+
+  # Ubuntu's virt-aa-helper builds each VM's AppArmor profile from the domain XML but does not
+  # resolve <disk type='volume'> (pool/volume references): the disk and its backing image were
+  # missing from the profile, so QEMU got "Permission denied" on the base image.
+  # This rewrites our pool's volume disks into <disk type='file'> with the same path, so
+  # virt-aa-helper adds exactly this VM's disk (rw) and the shared base image (r) — AppArmor
+  # stays enforcing, nothing is widened. The qcow2 driver set by the provider is kept, and the
+  # provider maps file disks back to the same volume_id on read (no perpetual diff).
+  xml {
+    xslt = local.volume_disk_as_file_xslt
+  }
+}
+
+locals {
+  volume_disk_as_file_xslt = <<-EOT
+    <?xml version="1.0"?>
+    <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+      <xsl:output omit-xml-declaration="yes" indent="yes"/>
+      <xsl:template match="node()|@*">
+        <xsl:copy><xsl:apply-templates select="node()|@*"/></xsl:copy>
+      </xsl:template>
+      <xsl:template match="/domain/devices/disk[@type='volume' and source/@pool='${var.pool_name}']/@type">
+        <xsl:attribute name="type">file</xsl:attribute>
+      </xsl:template>
+      <xsl:template match="/domain/devices/disk[@type='volume']/source[@pool='${var.pool_name}']">
+        <source file="${var.pool_path}/{@volume}"/>
+      </xsl:template>
+    </xsl:stylesheet>
+  EOT
 }
 
 output "vms" {

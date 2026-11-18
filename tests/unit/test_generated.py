@@ -215,6 +215,7 @@ def test_libvirt_hook(build, env):
     assert f"iptables -w -I LIBVIRT_FWI 1 {rule}" in text, "must be inserted FIRST, before libvirt's reject"
     assert f"iptables -w -D LIBVIRT_FWI {rule}" in text, "must be idempotent"
     assert "nft insert rule ip libvirt_network guest_input" in text
+    assert "export PATH=/usr/sbin:" in text, "libvirt runs hooks with a minimal PATH"
 
 
 def test_libvirt_hook_ignores_other_operations(build, tmp_path):
@@ -224,9 +225,31 @@ def test_libvirt_hook_ignores_other_operations(build, tmp_path):
     for b in ("iptables", "nft"):
         (fake / b).write_text(f"#!/bin/sh\necho CALLED >> {tmp_path}/calls\nexit 1\n")
         (fake / b).chmod(0o755)
-    r = subprocess.run(["bash", str(build / "host/libvirt-hook-network"), "zt-wan", "stopped", "end"],
-                       env={"PATH": f"{fake}:/usr/bin:/bin"}, capture_output=True, text=True)
+    hook = (build / "host/libvirt-hook-network").read_text().replace(
+        "export PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"export PATH={fake}:/usr/bin:/bin")
+    (tmp_path / "hook").write_text(hook)
+    r = subprocess.run(["bash", str(tmp_path / "hook"), "zt-wan", "stopped", "end"],
+                       env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
     assert r.returncode == 0 and not (tmp_path / "calls").exists()
+
+
+def test_libvirt_hook_runs_with_empty_path(build, tmp_path):
+    """Simulate libvirt: no PATH at all. The hook must still find iptables (via its own PATH)."""
+    fake = tmp_path / "sbin"
+    fake.mkdir()
+    # like the real iptables: -D fails once the rule is gone, -L/-I succeed
+    (fake / "iptables").write_text(
+        f"#!/bin/sh\necho \"$@\" >> {tmp_path}/calls\n"
+        "for a in \"$@\"; do [ \"$a\" = -D ] && exit 1; done\nexit 0\n")
+    (fake / "iptables").chmod(0o755)
+    hook = (build / "host/libvirt-hook-network").read_text().replace(
+        "export PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"export PATH={fake}:/usr/bin:/bin")
+    (tmp_path / "hook").write_text(hook)
+    r = subprocess.run(["/bin/bash", str(tmp_path / "hook"), "zt-dmz", "started", "begin"],
+                       env={}, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    calls = (tmp_path / "calls").read_text()
+    assert "-I LIBVIRT_FWI 1" in calls, calls
 
 
 def test_host_json(build):

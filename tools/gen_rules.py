@@ -405,9 +405,12 @@ def render_libvirt_hook(policy: dict, env: dict, rules: list[Rule]) -> str:
             "# Installed as /etc/libvirt/hooks/network.d/zerotrust. Args: <network> <op> <sub-op>.",
             "# Also run by zerotrust-host.service at boot. Idempotent.",
             "set -u",
+            "# libvirt runs hooks with a minimal environment: iptables/nft live in /usr/sbin",
+            "export PATH=/usr/sbin:/usr/bin:/sbin:/bin",
             'op="${2:-started}"',
             '[[ "$op" == "started" || "$op" == "reconnect" ]] || exit 0',
             "exec 0</dev/null",
+            'logger -t zerotrust-hook "network=${1:-?} op=$op: re-inserting WireGuard accept" 2>/dev/null || true',
             "",
             "# iptables backend (Ubuntu 24.04 default): chain LIBVIRT_FWI in table filter",
             "if iptables -w -n -L LIBVIRT_FWI >/dev/null 2>&1; then"]
