@@ -42,6 +42,7 @@
       - libvirt-daemon-system
       - libvirt-clients
       - genisoimage            # cloud-init ISO (terraform provider 0.8 uses mkisofs)
+      - xsltproc               # terraform provider applies the domain XSLT (vms.tf) with it
       - avahi-daemon
       - avahi-utils
       - libnss-mdns

@@ -73,7 +73,7 @@ def test_tooling_versions():
     cols = run(["ansible-galaxy", "collection", "list"], check=True).stdout
     for c in ("ansible.posix", "community.general"):
         assert c in cols, f"missing collection {c} (make host installs it)"
-    for b in ("mkisofs", "wg", "tcpdump", "nft", "openssl", "nc"):
+    for b in ("mkisofs", "xsltproc", "wg", "tcpdump", "nft", "openssl", "nc"):
         need(b)
 
 
