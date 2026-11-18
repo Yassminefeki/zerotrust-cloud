@@ -143,3 +143,14 @@ def test_avahi_only_on_wan(env):
     assert run(["systemctl", "is-active", "avahi-daemon"]).stdout.strip() == "active"
     conf = Path("/etc/avahi/avahi-daemon.conf").read_text()
     assert re.search(rf"^allow-interfaces={re.escape(env['wan_interface'])}\s*$", conf, re.M)
+
+
+def test_libvirtd_reruns_hook_on_start():
+    """libvirtd is socket-activated: each start rebuilds LIBVIRT_FWI without calling hooks."""
+    out = run(["systemctl", "show", "libvirtd", "-p", "ExecStartPost"]).stdout
+    assert "/etc/libvirt/hooks/network.d/zerotrust" in out
+
+
+def test_apt_cacher_ng_retries():
+    conf = Path("/etc/apt-cacher-ng/acng.conf").read_text()
+    assert re.search(r"^DlMaxRetries: *[1-9]", conf, re.M)

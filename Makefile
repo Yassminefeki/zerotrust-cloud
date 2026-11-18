@@ -11,7 +11,7 @@ PYTEST  := $(VENV)/bin/pytest
 BUILD   := build
 TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
-ANSIBLE := cd ansible &&
+ANSIBLE := cd $(CURDIR)/ansible &&
 
 .PHONY: help venv env gen check test-0 galaxy host test-1 infra wait test-2 up test destroy clean
 
@@ -44,10 +44,10 @@ test-0: venv  ## stage 0: offline tests of the policy and the generator
 
 # ---------------------------------------------------------------- stage 1 --
 galaxy:  ## install the Ansible collections (user level, no sudo)
-	cd ansible && ansible-galaxy collection install -r requirements.yml
+	$(ANSIBLE) ansible-galaxy collection install -r requirements.yml
 
 host: gen galaxy  ## stage 1: prepare the i5 (asks for your sudo password)
-	cd ansible && ansible-playbook host.yml --ask-become-pass
+	$(ANSIBLE) ansible-playbook host.yml --ask-become-pass
 
 test-1: venv gen  ## stage 1: host preflight tests (asks for sudo once)
 	sudo -v

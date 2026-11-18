@@ -61,6 +61,17 @@ locals {
           net.ipv4.conf.all.accept_source_route = 0
           net.ipv4.conf.all.log_martians = 1
         EOT
+        }, {
+        # Lean apt through apt-cacher-ng: fewer index files, retries, and no HTTP pipelining
+        # (pipelining through a proxy causes "Tried to start delayed item ... but failed").
+        path        = "/etc/apt/apt.conf.d/90zerotrust"
+        permissions = "0644"
+        content     = <<-EOT
+          Acquire::Languages "none";
+          Acquire::IndexTargets::deb::CNF::DefaultEnabled "false";
+          Acquire::Retries "3";
+          Acquire::http::Pipeline-Depth "0";
+        EOT
       }]
       runcmd = [["sysctl", "--system"]]
     })])

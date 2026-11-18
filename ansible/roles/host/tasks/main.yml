@@ -130,6 +130,16 @@
     enabled: true
 
 # ------------------------------------------------------------ apt cache --
+- name: Apt-cacher-ng retries slow upstream fetches (Wi-Fi) instead of returning 503
+  ansible.builtin.lineinfile:
+    path: /etc/apt-cacher-ng/acng.conf
+    regexp: "^#? *{{ item.key }}:"
+    line: "{{ item.key }}: {{ item.value }}"
+  loop:
+    - {key: DlMaxRetries, value: 6}
+    - {key: NetworkTimeout, value: 60}
+  notify: Restart apt-cacher-ng
+
 - name: Apt-cacher-ng running (reachable only from the mgmt bridge, see host nftables)
   ansible.builtin.systemd_service:
     name: apt-cacher-ng
@@ -171,6 +181,24 @@
     name: libvirtd
     state: restarted
   when: host_hookdir.changed or host_hookfile.changed
+
+- name: Drop-in directory for libvirtd
+  ansible.builtin.file:
+    path: /etc/systemd/system/libvirtd.service.d
+    state: directory
+    mode: "0755"
+
+- name: Re-run the hook every time libvirtd starts (it is socket-activated and rebuilds its chains)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/libvirtd.service.d/zerotrust.conf
+    mode: "0644"
+    content: |
+      # managed by zerotrust-cloud (ansible/roles/host)
+      # libvirtd exits when idle and, on each start, re-inserts its LIBVIRT_FWI rules above ours
+      # without calling network hooks: put the WireGuard accept back on top every time.
+      [Service]
+      ExecStartPost=-/etc/libvirt/hooks/network.d/zerotrust zt-wan started -
+  notify: Reload systemd
 
 - name: Systemd unit that applies host rules at boot (after libvirt and docker)
   ansible.builtin.template:

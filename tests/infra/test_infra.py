@@ -103,7 +103,8 @@ def test_domain_running_with_declared_memory(env, tf, name):
 def test_ssh_over_mgmt_and_cloud_init_done(vm, name):
     h = vm(name)
     assert h.run("hostname").stdout.strip() == name
-    status = h.run("cloud-init status").stdout
+    # first boot may still be finishing (runcmd applies the sysctls at the very end)
+    status = h.run("timeout 600 cloud-init status --wait; cloud-init status").stdout
     assert "status: done" in status, status
 
 
@@ -128,6 +129,12 @@ def test_routes_exact(vm, tf, name):
     want = sorted((("default" if x["to"] == "default" else x["to"]), x["via"], i["iface"])
                   for i in tf["nodes"][name]["interfaces"] for x in i["routes"])
     assert extra == want
+
+
+@pytest.mark.parametrize("name", NODES)
+def test_lean_apt_config(vm, name):
+    conf = vm(name).file("/etc/apt/apt.conf.d/90zerotrust").content_string
+    assert 'Pipeline-Depth "0"' in conf and 'Languages "none"' in conf
 
 
 @pytest.mark.parametrize("name", NODES)
@@ -162,8 +169,8 @@ def test_apt_cache_reachable_over_mgmt(vm, tf, name):
 
 
 def test_apt_update_through_cache(vm):
-    r = vm("ca").run("sudo apt-get -o Acquire::Retries=1 update -q")
-    assert r.rc == 0, r.stderr
+    r = vm("ca").run("sudo apt-get update -q")
+    assert r.rc == 0, r.stderr[-2000:]
 
 
 @pytest.mark.parametrize("name", NODES)

@@ -9,3 +9,12 @@
     name: zerotrust-host
     state: restarted
     daemon_reload: true
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart apt-cacher-ng
+  ansible.builtin.systemd_service:
+    name: apt-cacher-ng
+    state: restarted
