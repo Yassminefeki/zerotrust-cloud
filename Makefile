@@ -7,8 +7,11 @@ VENV    := .venv
 PY      := $(VENV)/bin/python
 PYTEST  := $(VENV)/bin/pytest
 BUILD   := build
+TF      := terraform -chdir=terraform
+TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
+ANSIBLE := cd ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait test-2 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -48,14 +51,28 @@ test-1: venv gen  ## stage 1: host preflight tests (asks for sudo once)
 	sudo -v
 	$(PYTEST) tests/host -v
 
+# ---------------------------------------------------------------- stage 2 --
+infra: gen  ## stage 2: libvirt networks + 6 VMs (terraform), then wait for cloud-init
+	$(TF) init -input=false
+	$(TF) apply -input=false -auto-approve $(TFVARS)
+	$(MAKE) --no-print-directory wait
+
+wait:  ## wait until every VM answers SSH over mgmt and cloud-init has finished
+	$(ANSIBLE) ansible all -o -m ansible.builtin.wait_for_connection -a "timeout=600"
+	$(ANSIBLE) ansible all -o -m ansible.builtin.shell -a "cloud-init status --wait >/dev/null; rc=\$$?; [ \$$rc -eq 0 ] || [ \$$rc -eq 2 ]"
+
+test-2: venv gen  ## stage 2: networks, VMs, IPs, routes, isolation, apt cache
+	sudo -v
+	$(PYTEST) tests/infra -v
+
 # ------------------------------------------------- full pipeline (filled in by later stages) --
-up: host  ## build everything (stages 1-7)
-	@echo ">> stages 2-7 not implemented yet."
+up: host infra  ## build everything (stages 1-7)
+	@echo ">> stages 3-7 not implemented yet."
 
-test: test-0 test-1  ## run every test
+test: test-0 test-1 test-2  ## run every test
 
-destroy:  ## tear down VMs and networks
-	@echo ">> nothing to destroy yet (terraform arrives in stage 2)."
+destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
+	$(TF) destroy -input=false -auto-approve $(TFVARS)
 
 clean:  ## remove generated files (keeps env.yaml and secrets)
 	rm -rf $(BUILD) .pytest_cache

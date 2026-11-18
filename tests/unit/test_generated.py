@@ -5,6 +5,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 import gen_rules
 from unit_helpers import mtls, nft
@@ -233,3 +234,30 @@ def test_host_json(build):
     assert h["wan_bridge"] == "virbr-zt-wan"
     assert h["host_services"] == ["tcp/3142"]
     assert h["dnat"] == [{"proto": "udp", "to": "192.168.122.10:51820"}]
+
+
+# ---------------------------------------------------- stage 2: terraform --
+def test_tfvars_routes_on_the_right_interface(build):
+    tf = json.loads((build / "terraform.tfvars.json").read_text())
+    by = {n: {i["iface"]: i for i in v["interfaces"]} for n, v in tf["nodes"].items()}
+    assert by["gateway"]["wan0"]["routes"] == [{"to": "default", "via": "192.168.122.1"}]
+    assert by["frontend"]["dmz0"]["routes"] == [{"to": "10.10.0.0/24", "via": "10.20.0.1"}]
+    for n, ifs in by.items():
+        for name, i in ifs.items():
+            if (n, name) not in {("gateway", "wan0"), ("frontend", "dmz0")}:
+                assert i["routes"] == [], f"{n}/{name} must have no route (VMs are never routed)"
+    assert [n for n, v in tf["nodes"].items() if v["ip_forward"]] == ["gateway"]
+    assert "wan" not in {i["network"] for n, v in tf["nodes"].items() if n != "gateway" for i in v["interfaces"]}
+
+
+def test_ssh_config_and_inventory(build, env):
+    cfg = (build / "ssh_config").read_text()
+    assert "Host frontend\n  HostName 10.50.0.20\n" in cfg
+    assert f"IdentityFile {env['ssh_public_key_file'][:-4]}\n" in cfg
+    inv = yaml.safe_load((build / "inventory.yml").read_text())
+    assert inv["all"]["hosts"]["ca"]["ansible_host"] == "10.50.0.10"
+    assert inv["all"]["vars"]["ansible_ssh_private_key_file"] == env["ssh_public_key_file"][:-4]
+
+
+def test_public_key_required(env):
+    assert gen_rules.validate_env(dict(env, ssh_public_key_file="~/.ssh/id_ed25519"))

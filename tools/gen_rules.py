@@ -74,6 +74,8 @@ def validate_env(env: dict) -> list[str]:
     except ValueError:
         if ep and not HOSTNAME_RE.match(ep):
             errs.append(f"env: entry_point '{ep}' is not a valid hostname")
+    if not str(env.get("ssh_public_key_file", "")).endswith(".pub"):
+        errs.append("env: ssh_public_key_file must be the PUBLIC key (*.pub)")
     wi = str(env.get("wan_interface", ""))
     if wi and not IFNAME_RE.match(wi):
         errs.append(f"env: wan_interface '{wi}' is not a valid interface name")
@@ -522,11 +524,16 @@ def render_tfvars(policy: dict, env: dict) -> dict:
         ifaces = []
         for i, n in enumerate(net_order):
             if n in spec["interfaces"]:
+                cidr = ipaddress.ip_network(nets[n]["cidr"])
+                routes = [{"to": "default", "via": spec["default_gateway"]["via"]}
+                          ] if spec.get("default_gateway", {}).get("network") == n else []
+                # each static route is attached to the interface whose network holds its next hop
+                routes += [{"to": r["to"], "via": r["via"]} for r in spec.get("routes", [])
+                           if ipaddress.ip_address(r["via"]) in cidr]
                 ifaces.append({"network": n, "ip": spec["interfaces"][n], "iface": nets[n]["iface"],
-                               "mac": _mac(i + 1, spec["id"]), "prefix": networks[n]["prefix"]})
+                               "mac": _mac(i + 1, spec["id"]), "prefix": networks[n]["prefix"],
+                               "routes": routes})
         nodes[name] = {"memory_mb": spec["memory_mb"], "interfaces": ifaces,
-                       "routes": spec.get("routes", []),
-                       "default_gateway": spec.get("default_gateway"),
                        "ip_forward": bool(spec.get("ip_forward"))}
     return {"libvirt_uri": env["libvirt_uri"], "pool_name": env["libvirt_pool_name"],
             "pool_path": env["libvirt_pool_path"], "image_url": env["ubuntu_image_url"],
@@ -541,8 +548,25 @@ def render_inventory(policy: dict, env: dict) -> dict:
     hosts = {n: {"ansible_host": s["interfaces"]["mgmt"], "zt_id": s["id"]}
              for n, s in policy["nodes"].items()}
     return {"all": {"vars": {"ansible_user": env["ssh_user"],
+                             "ansible_ssh_private_key_file": private_key_file(env),
                              "ansible_python_interpreter": "/usr/bin/python3"},
                     "hosts": hosts}}
+
+
+def private_key_file(env: dict) -> str:
+    return str(env["ssh_public_key_file"])[: -len(".pub")]
+
+
+def render_ssh_config(policy: dict, env: dict) -> str:
+    """`ssh -F build/ssh_config <node>` — mgmt network only. VMs are re-created often and
+    live on an isolated host-only bridge, so their host keys are not pinned."""
+    lines = [GENERATED_HEADER.rstrip()]
+    for n, s in policy["nodes"].items():
+        lines += [f"Host {n}", f"  HostName {s['interfaces']['mgmt']}", f"  User {env['ssh_user']}",
+                  f"  IdentityFile {private_key_file(env)}", "  IdentitiesOnly yes",
+                  "  StrictHostKeyChecking no", "  UserKnownHostsFile /dev/null",
+                  "  LogLevel ERROR", "  ConnectTimeout 5", ""]
+    return "\n".join(lines)
 
 
 def render_matrix(policy: dict, rules: list[Rule]) -> list[dict]:
@@ -613,6 +637,7 @@ def generate(policy: dict, env: dict, out: Path) -> dict[str, str]:
         files[f"wireguard/{name}"] = text
     files["terraform.tfvars.json"] = json.dumps(render_tfvars(policy, env), indent=2) + "\n"
     files["inventory.yml"] = GENERATED_HEADER + yaml.safe_dump(render_inventory(policy, env), sort_keys=False)
+    files["ssh_config"] = render_ssh_config(policy, env)
     files["matrix.json"] = json.dumps(render_matrix(policy, rules), indent=2) + "\n"
     files["flows.json"] = json.dumps([asdict(r) for r in rules], indent=2) + "\n"
     for rel, text in files.items():

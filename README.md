@@ -44,6 +44,10 @@ cp env.example.yaml env.yaml   # set wan_interface (ip -br link) and entry_point
 make test-0                    # stage 0: offline tests
 make host                      # stage 1: prepare the i5 (sudo password asked once)
 make test-1                    # stage 1: preflight tests
+make infra                     # stage 2: networks + 6 VMs (terraform), waits for cloud-init
+make test-2                    # stage 2: networks, IPs, routes, isolation
+ssh -F build/ssh_config frontend   # SSH to any VM over mgmt
+make destroy                   # remove VMs/networks (host prep stays)
 ```
 
 ## Host preparation (stage 1) — what `make host` changes on the i5
@@ -60,3 +64,20 @@ make test-1                    # stage 1: preflight tests
 
 Docker coexists: its rules are not touched (its FORWARD policy only affects its own bridges).
 Undo: `sudo systemctl disable --now zerotrust-host` and `sudo rm /etc/libvirt/hooks/network.d/zerotrust`.
+
+## Networks and VMs (stage 2)
+
+`terraform/` reads only `build/terraform.tfvars.json`. Provider: `dmacvicar/libvirt ~> 0.8.3`
+(the 0.9 line is a rewrite with a still-moving schema).
+
+| libvirt network | mode | host address | role |
+|---|---|---|---|
+| zt-wan (virbr-zt-wan) | nat | 192.168.122.1 | only the gateway; target of the DNAT |
+| zt-dmz / zt-app / zt-data | isolated (`none`) | **none** (pure L2) | data planes, the host cannot reach them |
+| zt-mgmt (virbr-zt-mgmt) | isolated | 10.50.0.1 | SSH/Ansible, step-ca enrolment, apt cache |
+
+No DHCP and no DNS on any network. Each VM gets static addresses from cloud-init
+(netplan matched by MAC, NICs renamed `wan0 dmz0 app0 data0 mgmt0`), IPv6 off,
+`rp_filter=1`, redirects off, `ip_forward=1` only on the gateway. Only two routes
+exist in the whole cloud: the gateway's default route via the libvirt NAT and the
+frontend's route back to the tunnel via the gateway.
