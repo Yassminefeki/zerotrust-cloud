@@ -74,19 +74,27 @@ def test_libvirt_default_network_still_off(env):
     assert r.returncode != 0 or re.search(r"Active:\s+no", r.stdout)
 
 
-def test_libvirt_hook_put_wireguard_accept_first(tf):
-    """The hook must have re-inserted our accept at the TOP of libvirt's inbound chain,
-    i.e. before libvirt's own REJECT for virbr-zt-wan."""
-    r = run(["iptables", "-w", "-S", "LIBVIRT_FWI"], sudo=True)
-    if r.returncode != 0:   # nftables backend
+def test_wireguard_accept_precedes_libvirt_reject():
+    """libvirt's LIBVIRT_FWI rejects new inbound traffic to zt-wan. Our accept must be in FORWARD
+    BEFORE the jump to LIBVIRT_FWI (libvirt never reorders that jump, so it stays there)."""
+    r = run(["iptables", "-w", "-S", "FORWARD"], sudo=True)
+    if r.returncode != 0 or "LIBVIRT_FWI" not in r.stdout:   # nftables backend
         chain = run(["nft", "list", "chain", "ip", "libvirt_network", "guest_input"], sudo=True, check=True).stdout
         rules = [l.strip() for l in chain.splitlines() if "virbr-zt-wan" in l]
-    else:
-        rules = [l for l in r.stdout.splitlines() if l.startswith("-A LIBVIRT_FWI")]
-    assert rules, "libvirt chain empty: is zt-wan active?"
-    assert "zt:wg-ingress" in rules[0], f"first rule is not ours:\n" + "\n".join(rules)
-    assert any("virbr-zt-wan" in l and re.search(r"REJECT|reject", l) for l in rules[1:]), \
-        "libvirt's reject should follow (proves we are in the right chain)"
+        assert rules and "zt:wg-ingress" in rules[0], "\n".join(rules)
+        return
+    rules = [l for l in r.stdout.splitlines() if l.startswith("-A FORWARD")]
+    ours = [i for i, l in enumerate(rules) if "zt:wg-ingress" in l]
+    jump = [i for i, l in enumerate(rules) if l.endswith("-j LIBVIRT_FWI")]
+    assert len(ours) == 1, "exactly one copy of the WireGuard accept:\n" + "\n".join(rules)
+    assert jump and ours[0] < jump[0], "accept must precede the jump to LIBVIRT_FWI:\n" + "\n".join(rules)
+
+
+def test_libvirt_reject_still_guards_other_inbound():
+    """We add ONE exception; libvirt's reject for anything else into zt-wan must still exist."""
+    out = run(["iptables", "-w", "-S", "LIBVIRT_FWI"], sudo=True).stdout
+    if out:
+        assert re.search(r"-o virbr-zt-wan -j REJECT", out)
 
 
 # --------------------------------------------------------------------- VMs --

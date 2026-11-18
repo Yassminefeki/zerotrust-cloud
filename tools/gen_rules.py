@@ -387,9 +387,11 @@ def render_host_nft(policy: dict, env: dict, rules: list[Rule]) -> str:
 
 
 def render_libvirt_hook(policy: dict, env: dict, rules: list[Rule]) -> str:
-    """libvirt's own NAT firewall (LIBVIRT_FWI) rejects NEW inbound traffic to a NAT network,
-    and an accept in another nftables table cannot override a reject. This hook re-inserts
-    the DNAT'd WireGuard flow at the top of libvirt's chain every time libvirt (re)builds it."""
+    """libvirt's own NAT firewall (chain LIBVIRT_FWI) rejects NEW inbound traffic to a NAT
+    network, and an accept in another nftables table cannot override a reject.
+    libvirt rebuilds LIBVIRT_FWI whenever it wants (daemon start, network start), so competing
+    for the top of THAT chain is a race. Instead the accept goes in FORWARD itself, before the
+    jump to LIBVIRT_FWI: libvirt only inserts that jump when it is missing and never reorders it."""
     nets = policy["networks"]
     wg = [r for r in rules if r.src.name == "internet"]
     wan_bridge = nets["wan"]["bridge"]
@@ -412,11 +414,12 @@ def render_libvirt_hook(policy: dict, env: dict, rules: list[Rule]) -> str:
             "exec 0</dev/null",
             'logger -t zerotrust-hook "network=${1:-?} op=$op: re-inserting WireGuard accept" 2>/dev/null || true',
             "",
-            "# iptables backend (Ubuntu 24.04 default): chain LIBVIRT_FWI in table filter",
+            "# iptables backend (Ubuntu 24.04 default): libvirt's chains live in table filter",
             "if iptables -w -n -L LIBVIRT_FWI >/dev/null 2>&1; then"]
     for rule in ipt:
-        body += [f"  while iptables -w -D LIBVIRT_FWI {rule} 2>/dev/null; do :; done",
-                 f"  iptables -w -I LIBVIRT_FWI 1 {rule}"]
+        body += [f"  while iptables -w -D LIBVIRT_FWI {rule} 2>/dev/null; do :; done   # old location",
+                 f"  while iptables -w -D FORWARD {rule} 2>/dev/null; do :; done",
+                 f"  iptables -w -I FORWARD 1 {rule}"]
     body += ["fi", "",
              "# nftables backend (newer libvirt): chain guest_input in table ip libvirt_network",
              "if nft list chain ip libvirt_network guest_input >/dev/null 2>&1; then"]

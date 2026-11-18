@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait test-2 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait recreate-vms test-2 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -64,6 +64,10 @@ infra: gen  ## stage 2: libvirt networks + 6 VMs (terraform), then wait for clou
 wait:  ## wait until every VM answers SSH over mgmt and cloud-init has finished
 	$(ANSIBLE) ansible all -m ansible.builtin.wait_for_connection -a "timeout=600"
 	$(ANSIBLE) ansible all -m ansible.builtin.shell -a "cloud-init status --wait >/dev/null; rc=\$$?; [ \$$rc -eq 0 ] || [ \$$rc -eq 2 ]"
+
+recreate-vms: gen  ## destroy and re-create the 6 VMs + their disks (keeps networks and base image)
+	$(TF) destroy -input=false -auto-approve -target=libvirt_domain.vm -target=libvirt_volume.disk $(TFVARS)
+	$(MAKE) --no-print-directory infra
 
 test-2: venv gen  ## stage 2: networks, VMs, IPs, routes, isolation, apt cache
 	sudo -v

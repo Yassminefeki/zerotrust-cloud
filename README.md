@@ -59,7 +59,7 @@ make destroy                   # remove VMs/networks (host prep stays)
 | `net.ipv4.ip_forward=1` in `/etc/sysctl.d/90-zerotrust.conf` | DNAT from the Wi-Fi to the gateway VM |
 | avahi `allow-interfaces=<wan_interface>` | announce `entry_point` only on the client-facing interface, not on Docker/libvirt bridges |
 | nftables table `inet zt_host` (own table, **never** `flush ruleset`, never default-drop) | DNAT `iifname "<wan_interface>" udp dport <wan_port>` → gateway; apt cache reachable only from `virbr-zt-mgmt` |
-| `/etc/libvirt/hooks/network.d/zerotrust` | libvirt's NAT chain `LIBVIRT_FWI` rejects new inbound traffic; an accept in another table cannot override a reject, so the hook re-inserts the WireGuard accept at the top of libvirt's chain each time libvirt rebuilds it |
+| `/etc/libvirt/hooks/network.d/zerotrust` (+ libvirtd drop-in) | libvirt's NAT chain `LIBVIRT_FWI` rejects new inbound traffic, and an accept in another table cannot override a reject. libvirt rebuilds that chain at will, so the single WireGuard accept is placed in `FORWARD` **before the jump** to `LIBVIRT_FWI` (libvirt never reorders that jump). Re-applied at boot, on network start and on libvirtd start |
 | `zerotrust-host.service` | re-applies both at boot, after libvirtd and docker |
 
 Docker coexists: its rules are not touched (its FORWARD policy only affects its own bridges).

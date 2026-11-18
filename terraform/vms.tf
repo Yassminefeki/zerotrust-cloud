@@ -151,6 +151,12 @@ resource "libvirt_domain" "vm" {
   xml {
     xslt = local.volume_disk_as_file_xslt
   }
+
+  # New cloud-init content means a fresh VM (cloud-init only runs on first boot);
+  # swapping the ISO under a running VM would silently do nothing.
+  lifecycle {
+    replace_triggered_by = [libvirt_cloudinit_disk.ci[each.key], libvirt_volume.disk[each.key]]
+  }
 }
 
 locals {

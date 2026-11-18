@@ -212,8 +212,9 @@ def test_libvirt_hook(build, env):
     assert r.returncode == 0, r.stderr
     rule = (f'-i {env["wan_interface"]} -o virbr-zt-wan -d 192.168.122.10/32 -p udp --dport 51820 '
             f'-m conntrack --ctstate DNAT')
-    assert f"iptables -w -I LIBVIRT_FWI 1 {rule}" in text, "must be inserted FIRST, before libvirt's reject"
-    assert f"iptables -w -D LIBVIRT_FWI {rule}" in text, "must be idempotent"
+    assert f"iptables -w -I FORWARD 1 {rule}" in text, "must sit in FORWARD, before the jump to LIBVIRT_FWI"
+    assert f"iptables -w -D FORWARD {rule}" in text, "must be idempotent"
+    assert f"iptables -w -I LIBVIRT_FWI" not in text, "libvirt rebuilds its own chain: never rely on it"
     assert "nft insert rule ip libvirt_network guest_input" in text
     assert "export PATH=/usr/sbin:" in text, "libvirt runs hooks with a minimal PATH"
 
@@ -249,7 +250,7 @@ def test_libvirt_hook_runs_with_empty_path(build, tmp_path):
                        env={}, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     calls = (tmp_path / "calls").read_text()
-    assert "-I LIBVIRT_FWI 1" in calls, calls
+    assert "-I FORWARD 1" in calls, calls
 
 
 def test_host_json(build):
