@@ -40,7 +40,23 @@ tunnel → frontend:8443).
 ## Quick start (so far)
 
 ```bash
-cp env.example.yaml env.yaml   # set wan_interface (ip -br link)
-make test-0                    # offline tests
-make gen                       # writes build/
+cp env.example.yaml env.yaml   # set wan_interface (ip -br link) and entry_point (<hostname>.local)
+make test-0                    # stage 0: offline tests
+make host                      # stage 1: prepare the i5 (sudo password asked once)
+make test-1                    # stage 1: preflight tests
 ```
+
+## Host preparation (stage 1) — what `make host` changes on the i5
+
+| Change | Why |
+|---|---|
+| installs qemu-kvm, libvirt, avahi-utils, libnss-mdns, apt-cacher-ng, wireguard-tools, tcpdump | VMs, `entry_point` over mDNS, packages for the isolated VMs, tests |
+| stops + disables libvirt's `default` network (refuses if a VM uses it) | it uses 192.168.122.0/24, the range of `zt-wan` |
+| `net.ipv4.ip_forward=1` in `/etc/sysctl.d/90-zerotrust.conf` | DNAT from the Wi-Fi to the gateway VM |
+| avahi `allow-interfaces=<wan_interface>` | announce `entry_point` only on the client-facing interface, not on Docker/libvirt bridges |
+| nftables table `inet zt_host` (own table, **never** `flush ruleset`, never default-drop) | DNAT `iifname "<wan_interface>" udp dport <wan_port>` → gateway; apt cache reachable only from `virbr-zt-mgmt` |
+| `/etc/libvirt/hooks/network.d/zerotrust` | libvirt's NAT chain `LIBVIRT_FWI` rejects new inbound traffic; an accept in another table cannot override a reject, so the hook re-inserts the WireGuard accept at the top of libvirt's chain each time libvirt rebuilds it |
+| `zerotrust-host.service` | re-applies both at boot, after libvirtd and docker |
+
+Docker coexists: its rules are not touched (its FORWARD policy only affects its own bridges).
+Undo: `sudo systemctl disable --now zerotrust-host` and `sudo rm /etc/libvirt/hooks/network.d/zerotrust`.

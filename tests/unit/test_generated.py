@@ -6,7 +6,8 @@ import subprocess
 
 import pytest
 
-from conftest import gen_rules, mtls, nft
+import gen_rules
+from unit_helpers import mtls, nft
 
 NODES = ["gateway", "frontend", "service-a", "service-b", "database", "ca"]
 
@@ -190,3 +191,45 @@ def test_matrix_required_denies(matrix, src, dst_ip, port):
 def test_tunnel_reaches_only_frontend_8443(matrix):
     ok = [(m["dst_ip"], m["port"]) for m in matrix if m["src"] == "tunnel" and m["expected"] == "allow"]
     assert ok == [("10.20.0.10", 8443)]
+
+
+# ------------------------------------------------------- stage 1: host --
+def test_host_apt_cache_guard(build):
+    host = (build / "host" / "nftables-zt.conf").read_text()
+    accepts = [l for l in host.splitlines() if "dport 3142 accept" in l]
+    assert accepts and all('iifname "virbr-zt-mgmt"' in l for l in accepts)
+    lines = [l.strip() for l in host.splitlines()]
+    drop = lines.index('iifname != "lo" tcp dport 3142 drop comment "zt: host service for mgmt only"')
+    assert all(lines.index(a.strip()) < drop for a in accepts), "accepts must come before the drop"
+
+
+def test_libvirt_hook(build, env):
+    hook = build / "host" / "libvirt-hook-network"
+    text = hook.read_text()
+    assert text.startswith("#!/bin/bash\n")
+    r = subprocess.run(["bash", "-n", str(hook)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    rule = (f'-i {env["wan_interface"]} -o virbr-zt-wan -d 192.168.122.10/32 -p udp --dport 51820 '
+            f'-m conntrack --ctstate DNAT')
+    assert f"iptables -w -I LIBVIRT_FWI 1 {rule}" in text, "must be inserted FIRST, before libvirt's reject"
+    assert f"iptables -w -D LIBVIRT_FWI {rule}" in text, "must be idempotent"
+    assert "nft insert rule ip libvirt_network guest_input" in text
+
+
+def test_libvirt_hook_ignores_other_operations(build, tmp_path):
+    """On 'stopped' etc. the hook must exit 0 without touching anything."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    for b in ("iptables", "nft"):
+        (fake / b).write_text(f"#!/bin/sh\necho CALLED >> {tmp_path}/calls\nexit 1\n")
+        (fake / b).chmod(0o755)
+    r = subprocess.run(["bash", str(build / "host/libvirt-hook-network"), "zt-wan", "stopped", "end"],
+                       env={"PATH": f"{fake}:/usr/bin:/bin"}, capture_output=True, text=True)
+    assert r.returncode == 0 and not (tmp_path / "calls").exists()
+
+
+def test_host_json(build):
+    h = json.loads((build / "host/host.json").read_text())
+    assert h["wan_bridge"] == "virbr-zt-wan"
+    assert h["host_services"] == ["tcp/3142"]
+    assert h["dnat"] == [{"proto": "udp", "to": "192.168.122.10:51820"}]

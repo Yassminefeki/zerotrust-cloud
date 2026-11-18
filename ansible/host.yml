@@ -1,0 +1,15 @@
+# Stage 1 — prepare the i5 (CLOUD host). Run via `make host` (asks for your sudo password).
+# Idempotent. Never default-drops the host, never touches Docker's own rules.
+- name: Prepare the CLOUD host (i5)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+  vars_files:
+    - ../env.yaml
+  vars:
+    repo_root: "{{ playbook_dir | dirname }}"
+    build_dir: "{{ repo_root }}/build"
+    zt_host: "{{ lookup('file', build_dir ~ '/host/host.json') | from_json }}"
+  roles:
+    - host

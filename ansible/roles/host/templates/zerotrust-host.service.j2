@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+# Applies the host-side rules generated from policy.yaml + env.yaml:
+#  - nftables table inet zt_host (DNAT on {{ wan_interface }} by name, apt-cache guard)
+#  - re-inserts the WireGuard accept into libvirt's own NAT chain
+# Only touches its own table: never `flush ruleset` (Docker and libvirt live here too).
+[Unit]
+Description=zerotrust-cloud host rules (DNAT to gateway VM, libvirt accept)
+After=network-online.target libvirtd.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/zerotrust/nftables-zt.conf
+ExecStart=/etc/libvirt/hooks/network.d/zerotrust zt-wan started -
+ExecStop=-/usr/sbin/nft delete table inet zt_host
+
+[Install]
+WantedBy=multi-user.target

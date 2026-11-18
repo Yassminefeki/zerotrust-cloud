@@ -371,12 +371,59 @@ def render_host_nft(policy: dict, env: dict, rules: list[Rule]) -> str:
     lines += ["  }", "",
               "  chain input {",
               "    type filter hook input priority filter - 10; policy accept;"]
+    host_ports = set()
     for r in rules:
         if r.dst.kind == "host":
+            host_ports.add((r.proto, r.port))
             lines.append(f'    iifname "{r.dst.iface}" ip saddr {r.src.addr} ip daddr {r.dst.addr} '
                          f'{r.proto} dport {r.port} accept comment "{r.section}:{r.name}"')
+    # Services the host offers to the cloud (apt cache) must not leak to the Wi-Fi LAN.
+    for proto, port in sorted(host_ports):
+        lines.append(f'    iifname != "lo" {proto} dport {port} drop comment "zt: host service for mgmt only"')
     lines += ["  }", "}"]
     return "\n".join(lines) + "\n"
+
+
+def render_libvirt_hook(policy: dict, env: dict, rules: list[Rule]) -> str:
+    """libvirt's own NAT firewall (LIBVIRT_FWI) rejects NEW inbound traffic to a NAT network,
+    and an accept in another nftables table cannot override a reject. This hook re-inserts
+    the DNAT'd WireGuard flow at the top of libvirt's chain every time libvirt (re)builds it."""
+    nets = policy["networks"]
+    wg = [r for r in rules if r.src.name == "internet"]
+    wan_bridge = nets["wan"]["bridge"]
+    ipt, nft = [], []
+    for r in wg:
+        ipt.append(f'-i {env["wan_interface"]} -o {wan_bridge} -d {r.dst.addr}/32 -p {r.proto} '
+                   f'--dport {r.port} -m conntrack --ctstate DNAT '
+                   f'-m comment --comment zt:{r.name} -j ACCEPT')
+        nft.append(f'iifname "{env["wan_interface"]}" oifname "{wan_bridge}" ip daddr {r.dst.addr} '
+                   f'{r.proto} dport {r.port} ct status dnat counter accept comment "zt:{r.name}"')
+    body = ["#!/bin/bash",
+            GENERATED_HEADER.rstrip(),
+            "# Installed as /etc/libvirt/hooks/network.d/zerotrust. Args: <network> <op> <sub-op>.",
+            "# Also run by zerotrust-host.service at boot. Idempotent.",
+            "set -u",
+            'op="${2:-started}"',
+            '[[ "$op" == "started" || "$op" == "reconnect" ]] || exit 0',
+            "exec 0</dev/null",
+            "",
+            "# iptables backend (Ubuntu 24.04 default): chain LIBVIRT_FWI in table filter",
+            "if iptables -w -n -L LIBVIRT_FWI >/dev/null 2>&1; then"]
+    for rule in ipt:
+        body += [f"  while iptables -w -D LIBVIRT_FWI {rule} 2>/dev/null; do :; done",
+                 f"  iptables -w -I LIBVIRT_FWI 1 {rule}"]
+    body += ["fi", "",
+             "# nftables backend (newer libvirt): chain guest_input in table ip libvirt_network",
+             "if nft list chain ip libvirt_network guest_input >/dev/null 2>&1; then"]
+    for rule in nft:
+        tag = rule.rsplit("comment ", 1)[1]
+        body += [f"  for h in $(nft -a list chain ip libvirt_network guest_input | "
+                 f"grep -F '{tag}' | sed -n 's/.*# handle //p'); do",
+                 "    nft delete rule ip libvirt_network guest_input handle \"$h\"",
+                 "  done",
+                 f"  nft insert rule ip libvirt_network guest_input {rule}"]
+    body += ["fi", "exit 0"]
+    return "\n".join(body) + "\n"
 
 
 def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
@@ -553,6 +600,15 @@ def generate(policy: dict, env: dict, out: Path) -> dict[str, str]:
         files[f"nodes/{d}/pg_hba.conf"] = render_pg_hba(policy, rules)
         files[f"nodes/{d}/pg_ident.conf"] = render_pg_ident(policy, rules)
     files["host/nftables-zt.conf"] = render_host_nft(policy, env, rules)
+    files["host/libvirt-hook-network"] = render_libvirt_hook(policy, env, rules)
+    files["host/host.json"] = json.dumps({
+        "wan_bridge": policy["networks"]["wan"]["bridge"],
+        "wan_cidr": policy["networks"]["wan"]["cidr"],
+        "zt_bridges": [s["bridge"] for s in policy["networks"].values() if "bridge" in s],
+        "policy_cidrs": [s["cidr"] for s in policy["networks"].values()],
+        "host_services": sorted({f"{r.proto}/{r.port}" for r in rules if r.dst.kind == "host"}),
+        "dnat": [{"proto": r.proto, "to": f"{r.dst.addr}:{r.port}"} for r in rules if r.src.name == "internet"],
+    }, indent=2) + "\n"
     for name, text in render_wireguard(policy, env).items():
         files[f"wireguard/{name}"] = text
     files["terraform.tfvars.json"] = json.dumps(render_tfvars(policy, env), indent=2) + "\n"

@@ -1,15 +1,12 @@
 """Offline fixtures: generate everything from policy.yaml + env.example.yaml into a tmp dir."""
 import copy
 import json
-import sys
-from pathlib import Path
 
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools"))
-import gen_rules  # noqa: E402
+import gen_rules
+from unit_helpers import ROOT
 
 
 @pytest.fixture(scope="session")
@@ -37,11 +34,3 @@ def matrix(build):
 @pytest.fixture
 def mutable_policy(policy):
     return copy.deepcopy(policy)
-
-
-def nft(build, node):
-    return (build / "nodes" / node / "nftables.conf").read_text()
-
-
-def mtls(build, node):
-    return json.loads((build / "nodes" / node / "mtls.json").read_text())

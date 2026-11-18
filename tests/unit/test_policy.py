@@ -6,7 +6,8 @@ import subprocess
 
 import pytest
 
-from conftest import ROOT, gen_rules
+import gen_rules
+from unit_helpers import ROOT
 
 
 def test_policy_and_example_env_are_valid(policy, env):

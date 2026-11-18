@@ -1,0 +1,186 @@
+---
+# ---------------------------------------------------------------- sanity --
+- name: Refuse to run if the WAN interface from env.yaml does not exist
+  ansible.builtin.assert:
+    that: wan_interface in ansible_facts.interfaces
+    fail_msg: "wan_interface '{{ wan_interface }}' not found. Fix env.yaml (see: ip -br link)."
+
+- name: Check that no foreign interface overlaps a policy CIDR
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'EOF'
+    import ipaddress, json, subprocess
+    zt = json.loads('''{{ zt_host | to_json }}''')
+    cidrs = [ipaddress.ip_network(c) for c in zt["policy_cidrs"]]
+    ours = set(zt["zt_bridges"]) | {"virbr0"}   # virbr0 = libvirt 'default', disabled below
+    bad = []
+    for l in json.loads(subprocess.check_output(["ip", "-j", "-4", "addr"])):
+        if l["ifname"] in ours:
+            continue
+        for a in l.get("addr_info", []):
+            ip = ipaddress.ip_address(a["local"])
+            bad += [f'{l["ifname"]} {ip} overlaps {c}' for c in cidrs if ip in c]
+    if bad:
+        raise SystemExit("\n".join(bad))
+    EOF
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+# -------------------------------------------------------------- packages --
+- name: Preseed apt-cacher-ng (no HTTPS tunnelling)
+  ansible.builtin.debconf:
+    name: apt-cacher-ng
+    question: apt-cacher-ng/tunnelenable
+    value: "false"
+    vtype: boolean
+
+- name: Install virtualisation, mDNS, apt cache and test tooling
+  ansible.builtin.apt:
+    name:
+      - qemu-kvm
+      - libvirt-daemon-system
+      - libvirt-clients
+      - genisoimage            # cloud-init ISO (terraform provider 0.8 uses mkisofs)
+      - avahi-daemon
+      - avahi-utils
+      - libnss-mdns
+      - apt-cacher-ng
+      - nftables
+      - iptables
+      - wireguard-tools        # test-peer netns (stage 5)
+      - tcpdump                # confidentiality tests (stage 8)
+      - openssl
+      - python3-venv
+      - netcat-openbsd
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Libvirtd running
+  ansible.builtin.systemd_service:
+    name: libvirtd
+    state: started
+    enabled: true
+
+- name: Invoking user is in libvirt and kvm groups ({{ lookup('env', 'USER') }})
+  ansible.builtin.user:
+    name: "{{ lookup('env', 'USER') }}"
+    groups: [libvirt, kvm]
+    append: true
+
+# ------------------------------------------------- libvirt 'default' net --
+# It uses 192.168.122.0/24, the same range as our zt-wan network.
+- name: List domains attached to the libvirt 'default' network
+  ansible.builtin.shell: |
+    set -o pipefail
+    for d in $(virsh -c qemu:///system list --all --name); do
+      virsh -c qemu:///system domiflist "$d" | awk '$3=="default"{print d}' d="$d"
+    done
+  args:
+    executable: /bin/bash
+  register: host_default_users
+  changed_when: false
+
+- name: Refuse to disable 'default' if a VM still uses it
+  ansible.builtin.assert:
+    that: host_default_users.stdout | trim == ""
+    fail_msg: "VMs on libvirt 'default' network: {{ host_default_users.stdout_lines }}. Move or delete them first."
+
+- name: Check whether the 'default' network is defined
+  ansible.builtin.command: virsh -c qemu:///system net-info default
+  register: host_default_net
+  changed_when: false
+  failed_when: false
+
+- name: Stop the 'default' network
+  ansible.builtin.command: virsh -c qemu:///system net-destroy default
+  when: host_default_net.rc == 0 and (host_default_net.stdout is search('Active:\s+yes'))
+  changed_when: true
+
+- name: Do not autostart the 'default' network
+  ansible.builtin.command: virsh -c qemu:///system net-autostart default --disable
+  when: host_default_net.rc == 0 and (host_default_net.stdout is search('Autostart:\s+yes'))
+  changed_when: true
+
+# ------------------------------------------------------------- forwarding --
+- name: IPv4 forwarding on (persistent)
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_file: /etc/sysctl.d/90-zerotrust.conf
+    reload: true
+
+# ------------------------------------------------------------------ avahi --
+- name: Avahi announces the host only on the WAN interface (not docker/libvirt bridges)
+  community.general.ini_file:
+    path: /etc/avahi/avahi-daemon.conf
+    section: server
+    option: allow-interfaces
+    value: "{{ wan_interface }}"
+    no_extra_spaces: true
+    mode: "0644"
+  notify: Restart avahi
+
+- name: Avahi running
+  ansible.builtin.systemd_service:
+    name: avahi-daemon
+    state: started
+    enabled: true
+
+# ------------------------------------------------------------ apt cache --
+- name: Apt-cacher-ng running (reachable only from the mgmt bridge, see host nftables)
+  ansible.builtin.systemd_service:
+    name: apt-cacher-ng
+    state: started
+    enabled: true
+
+# ---------------------------------------------------- host nftables + hook --
+- name: Directory /etc/zerotrust exists
+  ansible.builtin.file:
+    path: /etc/zerotrust
+    state: directory
+    mode: "0755"
+
+- name: Install host nftables table (generated from policy.yaml + env.yaml)
+  ansible.builtin.copy:
+    src: "{{ build_dir }}/host/nftables-zt.conf"
+    dest: /etc/zerotrust/nftables-zt.conf
+    mode: "0644"
+    validate: nft -c -f %s
+  notify: Reload zerotrust-host
+
+- name: Libvirt hooks.d directory
+  ansible.builtin.file:
+    path: /etc/libvirt/hooks/network.d
+    state: directory
+    mode: "0755"
+  register: host_hookdir
+
+- name: Install libvirt network hook (re-allows the DNAT'd WireGuard flow in libvirt's chain)
+  ansible.builtin.copy:
+    src: "{{ build_dir }}/host/libvirt-hook-network"
+    dest: /etc/libvirt/hooks/network.d/zerotrust
+    mode: "0755"
+  register: host_hookfile
+  notify: Reload zerotrust-host
+
+- name: Libvirtd must be restarted to discover a new hook
+  ansible.builtin.systemd_service:
+    name: libvirtd
+    state: restarted
+  when: host_hookdir.changed or host_hookfile.changed
+
+- name: Systemd unit that applies host rules at boot (after libvirt and docker)
+  ansible.builtin.template:
+    src: zerotrust-host.service.j2
+    dest: /etc/systemd/system/zerotrust-host.service
+    mode: "0644"
+  notify: Reload zerotrust-host
+
+- name: Zerotrust-host enabled and applied
+  ansible.builtin.systemd_service:
+    name: zerotrust-host
+    enabled: true
+    state: started
+    daemon_reload: true
