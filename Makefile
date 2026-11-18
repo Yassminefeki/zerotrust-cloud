@@ -1,6 +1,8 @@
 # zerotrust-cloud — run everything from the i5 (CLOUD host).
 SHELL   := /bin/bash
 .ONESHELL:
+# with .ONESHELL a recipe is ONE script: stop at the first failing line
+.SHELLFLAGS := -euo pipefail -c
 .DEFAULT_GOAL := help
 
 VENV    := .venv
@@ -54,12 +56,14 @@ test-1: venv gen  ## stage 1: host preflight tests (asks for sudo once)
 # ---------------------------------------------------------------- stage 2 --
 infra: gen  ## stage 2: libvirt networks + 6 VMs (terraform), then wait for cloud-init
 	$(TF) init -input=false
-	$(TF) apply -input=false -auto-approve $(TFVARS)
+	# -parallelism=1: the 6 VMs share one backing image; libvirt changes its owner at each
+	# start (and restores it on failure) without a lock manager, so parallel starts race.
+	$(TF) apply -input=false -auto-approve -parallelism=1 $(TFVARS)
 	$(MAKE) --no-print-directory wait
 
 wait:  ## wait until every VM answers SSH over mgmt and cloud-init has finished
-	$(ANSIBLE) ansible all -o -m ansible.builtin.wait_for_connection -a "timeout=600"
-	$(ANSIBLE) ansible all -o -m ansible.builtin.shell -a "cloud-init status --wait >/dev/null; rc=\$$?; [ \$$rc -eq 0 ] || [ \$$rc -eq 2 ]"
+	$(ANSIBLE) ansible all -m ansible.builtin.wait_for_connection -a "timeout=600"
+	$(ANSIBLE) ansible all -m ansible.builtin.shell -a "cloud-init status --wait >/dev/null; rc=\$$?; [ \$$rc -eq 0 ] || [ \$$rc -eq 2 ]"
 
 test-2: venv gen  ## stage 2: networks, VMs, IPs, routes, isolation, apt cache
 	sudo -v
