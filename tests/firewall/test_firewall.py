@@ -75,6 +75,17 @@ def test_persistent_and_no_pending_rollback(vm, name):
     assert not h.service("ufw").is_running
     assert h.run("systemctl is-active zt-nft-rollback.timer").stdout.strip() != "active", \
         "a rollback is still armed: the last apply was never confirmed"
+    assert not h.file("/run/zt-nft/rolled-back").exists, "the last apply was rolled back"
+
+
+@pytest.mark.parametrize("name", NODES)
+def test_admin_ssh_replies_survive_conntrack_loss(vm, name):
+    """Anti lock-out: even with conntrack state flushed (as on the very first ruleset load),
+    the VM's SSH replies to the i5 are accepted, so the running session is not cut."""
+    h = vm(name)
+    # conntrack -F would cut nothing here; the rule itself is what matters
+    rule = [l for l in h.check_output("nft list chain inet zt output").splitlines() if "sport 22" in l]
+    assert len(rule) == 1 and "daddr 10.50.0.1" in rule[0], rule
 
 
 # ---------------------------------------------------------------- probes --

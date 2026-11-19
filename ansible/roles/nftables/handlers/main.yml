@@ -2,3 +2,5 @@
 - name: Load ruleset with rollback
   ansible.builtin.command: /usr/local/sbin/zt-nft-apply
   changed_when: true
+  # must answer well before the 120 s rollback; a hang here means the new rules cut this session
+  timeout: 60

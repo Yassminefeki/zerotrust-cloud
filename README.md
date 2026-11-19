@@ -112,10 +112,16 @@ Each VM loads `build/nodes/<vm>/nftables.conf` (generated from `policy.yaml`): o
 rate-limited `log` before every drop (`journalctl -k | grep zt-drop-`). A flow is open only
 if both ends allow it: the source's output chain and the destination's input chain.
 
-Anti lock-out: SSH from the i5 over mgmt is part of the policy (`infra: admin-ssh`, checked
-by the unit tests). On top of that, `zt-nft-apply` saves the live ruleset and arms a 120 s
-systemd timer that restores it, then loads the new rules; Ansible opens a *fresh* SSH
-connection and only then disarms the timer. A ruleset that cuts SSH undoes itself.
+Anti lock-out, three layers:
+1. SSH from the i5 over mgmt is part of the policy (`infra: admin-ssh`, unit-tested on every VM).
+2. `ssh` is the only service with `stateless_replies: true`: the VM may answer the i5 from
+   port 22 even without conntrack state. Needed because the Ansible session that loads the
+   *first* ruleset was opened before conntrack existed; its next reply is classified `new`
+   and would otherwise be dropped (this happened, and was reproduced, before the fix).
+3. `zt-nft-apply` saves the live ruleset, arms a 120 s rollback timer, loads the new rules;
+   Ansible then opens a *fresh* SSH connection and runs `--confirm`, which **fails** if the
+   rollback already fired or if the expected tables are not live (and leaves the rollback
+   armed). A ruleset that cuts SSH undoes itself and the play fails loudly.
 
 Tests probe real TCP connections for every source x destination x port of
 `build/matrix.json`: allowed = handshake or RST (nothing listening yet), denied = timeout

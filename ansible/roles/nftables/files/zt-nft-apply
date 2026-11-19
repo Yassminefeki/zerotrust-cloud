@@ -1,20 +1,33 @@
 #!/bin/bash
 # zt-nft-apply — load /etc/nftables.conf with an automatic rollback (anti lock-out).
 #
-#  1. refuse a ruleset that does not parse
-#  2. save the live ruleset and arm a transient systemd timer that restores it in N seconds
-#  3. load the new ruleset
-# The caller (Ansible) must then open a NEW SSH connection and run `zt-nft-apply --confirm`,
-# which disarms the timer. If the new rules cut SSH, nobody confirms and the VM rolls back
-# by itself.
+#   zt-nft-apply            check, save the live ruleset, arm a rollback timer, load the new rules
+#   zt-nft-apply --confirm  called by Ansible over a NEW SSH connection: disarm the rollback.
+#                           FAILS if the rollback already fired or if the new rules are not live,
+#                           so a lock-out can never be reported as a success.
 set -euo pipefail
 NEW=/etc/nftables.conf
 ROLLBACK=/etc/nftables.rollback
 UNIT=zt-nft-rollback
+STATE=/run/zt-nft            # tmpfs: pending / rolled-back markers
 DELAY="${ZT_ROLLBACK_SECONDS:-120}"
+mkdir -p "$STATE"
 
 if [[ "${1:-}" == "--confirm" ]]; then
+  if [[ -e "$STATE/rolled-back" ]]; then
+    logger -t zt-nft-apply "CONFIRM REFUSED: the rollback already fired (the new rules cut SSH?)"
+    echo "rollback already happened: the new ruleset is NOT active" >&2
+    exit 1
+  fi
+  expected=$(sed -n 's/^table \(.*\) {$/table \1/p' "$NEW" | sort | tr '\n' ' ')
+  live=$(nft list tables | sort | tr '\n' ' ')
+  if [[ "$expected" != "$live" ]]; then   # checked BEFORE disarming: leave the rollback armed
+    logger -t zt-nft-apply "CONFIRM REFUSED: live tables [$live] != expected [$expected]"
+    echo "live tables [$live] differ from $NEW [$expected]" >&2
+    exit 1
+  fi
   systemctl stop "$UNIT.timer" "$UNIT.service" 2>/dev/null || true
+  rm -f "$STATE/pending"
   logger -t zt-nft-apply "new ruleset confirmed, rollback disarmed"
   exit 0
 fi
@@ -22,6 +35,9 @@ fi
 nft -c -f "$NEW"
 { echo "flush ruleset"; nft list ruleset; } > "$ROLLBACK"
 systemctl stop "$UNIT.timer" "$UNIT.service" 2>/dev/null || true
-systemd-run --quiet --unit="$UNIT" --on-active="$DELAY" /usr/sbin/nft -f "$ROLLBACK"
+rm -f "$STATE/rolled-back"
+touch "$STATE/pending"
+systemd-run --quiet --unit="$UNIT" --on-active="$DELAY" /bin/sh -c \
+  "/usr/sbin/nft -f $ROLLBACK; touch $STATE/rolled-back; rm -f $STATE/pending; logger -t zt-nft-apply 'ROLLBACK FIRED: previous ruleset restored'"
 nft -f "$NEW"
 logger -t zt-nft-apply "new ruleset loaded, rollback armed for ${DELAY}s"

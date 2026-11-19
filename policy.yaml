@@ -83,7 +83,10 @@ services:
   api-b:     {node: service-b, network: app,  port: 9443,  proto: tcp, mtls: true}
   postgres:  {node: database,  network: data, port: 5432,  proto: tcp, mtls: true, db_user: service_b, db_name: appdb}
   step-ca:   {node: ca,        network: mgmt, port: 9000,  proto: tcp}
-  ssh:       {node: "*",       network: mgmt, port: 22,    proto: tcp}
+  # stateless_replies: the server may answer from its port even when conntrack has no state for
+  # the flow. Needed for SSH only: the Ansible session that loads the very first ruleset was opened
+  # BEFORE conntrack existed, so its next reply is classified "new" and would be dropped (lock-out).
+  ssh:       {node: "*",       network: mgmt, port: 22,    proto: tcp, stateless_replies: true}
   apt-cache: {node: host,      network: mgmt, port: 3142,  proto: tcp}
 
 # --- Business flows (the "who talks to whom") ----------------------------------

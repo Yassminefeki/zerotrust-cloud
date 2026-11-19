@@ -318,6 +318,10 @@ def render_node_nft(policy: dict, node: str, rules: list[Rule]) -> str:
             if r.proto == "udp":
                 # UDP server (WireGuard) may originate handshakes from its port after conntrack expiry.
                 out.append(f'oifname "{iif}" ip saddr {r.dst.addr} udp sport {r.port} accept {c}')
+            elif policy["services"][r.service].get("stateless_replies"):
+                # replies only: from the service port, back to the declared source address
+                out.append(f'oifname "{iif}" ip saddr {r.dst.addr} ip daddr {r.src.addr.split("/")[0]} '
+                           f'tcp sport {r.port} accept comment "{r.section}:{r.name}:replies"')
         if r.src.kind == "node" and r.src.name == node:
             out.append(f'oifname "{r.src.iface}" ip saddr {r.src.addr} ip daddr {r.dst.addr} {match} '
                        f'ct state new accept {c}')

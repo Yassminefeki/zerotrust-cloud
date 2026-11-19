@@ -53,6 +53,11 @@ def test_ssh_only_from_host_on_mgmt(build, node):
     ssh = [l for l in text.splitlines() if "dport 22 " in l]
     assert len(ssh) == 1
     assert 'iifname "mgmt0" ip saddr 10.50.0.1/32' in ssh[0]
+    # replies to the i5 survive a first ruleset load over an already-open (untracked) session
+    replies = [l.strip() for l in text.splitlines() if "sport 22 " in l]
+    ip = next(l for l in text.splitlines() if "dport 22 " in l).split("ip daddr ")[1].split()[0]
+    assert replies == [f'oifname "mgmt0" ip saddr {ip} ip daddr 10.50.0.1 tcp sport 22 accept '
+                       f'comment "infra:admin-ssh:replies"']
 
 
 def test_only_the_gateway_forwards_and_only_tunnel_to_frontend_8443(build):
@@ -85,7 +90,8 @@ def test_mgmt_never_reaches_business_ports(build):
     for node in NODES:
         for l in nft(build, node).splitlines():
             if '"mgmt0"' in l:
-                assert re.search(r"dport (22|9000|3142) ", l), f"{node}: mgmt rule on business port: {l}"
+                assert re.search(r"dport (22|9000|3142) |sport 22 accept", l), \
+                    f"{node}: mgmt rule on business port: {l}"
 
 
 def test_only_wireguard_is_open_to_anything(build):
@@ -302,3 +308,12 @@ def test_pki_identities_and_ca_policy(build):
     assert "10.50.0.20" not in allow["ip"], "no mgmt address may ever be certified"
     assert sorted(allow["dns"]) == sorted(i["cn"] for i in ids.values())
     assert pki["x509_policy"]["allowWildcardNames"] is False
+
+
+def test_stateless_replies_only_for_ssh(policy, build):
+    """The conntrack-free reply exception is reserved to admin SSH, never to business flows."""
+    assert [k for k, v in policy["services"].items() if v.get("stateless_replies")] == ["ssh"]
+    for node in NODES:
+        for l in nft(build, node).splitlines():
+            if "sport" in l and "accept" in l:
+                assert "sport 22 " in l or "udp sport 51820" in l, l
