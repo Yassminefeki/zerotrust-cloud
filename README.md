@@ -77,6 +77,7 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | 9 | `make certs services` | `make test-9` | each actor × each route: allowed, 403 (logged) or 404, exactly as the policy says |
 | 10 | `make services` | `make test-10` | ZT Bank live: own accounts only, IDOR → 404, transfers, replay-safe, RLS + append-only in the real DB, audit |
 | 11 | `make services client-certs` | `make test-11` | the website through the tunnel (strict CSP, repo files, read-only), CSRF refused + logged, Firefox bundles for the i7 |
+| 12 | `make host wireguard firewall services client-certs bot` | `make test-12` | the bot (own netns, device-bound certificate, rate limits) and the partner webhook from outside without VPN (signature, time window, anti-replay) |
 
 The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
 Ubuntu's SHA256SUMS) into `~/.cache/zerotrust/`; `make infra` uploads that local copy, so a
@@ -364,3 +365,51 @@ account, no CSP violation, and an attacker's page on another origin trying a for
 POST: refused, nothing paid. `tests/unit/test_browser_bundle.py` runs the playbook's bundle task
 and imports the result with NSS's `pk12util` (Firefox's own crypto library). Live,
 `make test-11` checks the deployed site, CSRF on the real chain and the exported bundles.
+
+## The edges: the statements bot and the payment partner (stage 12)
+
+```
+ i5 netns zt-bot ──wg (own key, 10.10.0.3)──► gateway ─[≤5 new conn/s]─► frontend:8443 ─► … (statements)
+ PayFlow (internet, no VPN) ─► i5 Wi-Fi:8444 ─DNAT─► gateway ─DNAT+SNAT─► frontend:8444 /webhook ─► core ─► ledger
+```
+
+**The bot** (`tools/zt-bot.py`, `make bot-run`) lives in its own network namespace on the i5 whose
+only interface is its own WireGuard peer, routed to the frontend and nothing else. Its 1-hour
+certificate is **bound to that device** (`device: bot` in `policy.yaml`): the same certificate
+presented from any other tunnel address gets 403 — a stolen bot key is useless elsewhere. The bot
+renews by asking the admin's Ansible (`make bot-run` = `client-certs` + one run); it holds no
+standing credential to the CA, which stays unreachable from the i5.
+
+**Rate limits**, from `policy.yaml`:
+- per identity at the frontend (`roles.<role>.rate_limit`: customer/staff 240/min, bot 20/min,
+  partner 60/min): token bucket, `429` + `Retry-After`, logged once per burst with the identity;
+  another identity is not affected;
+- per peer at the gateway (`wireguard.peers[].conn_limit`, bot: 5 new connections/s, burst 10):
+  even a compromised bot cannot flood the bank.
+
+**The partner** calls from the internet, without the VPN. One more port is published (8444,
+matched by interface name on the i5, never by address); the gateway translates it to the
+frontend's partner listener, which only ever sees the gateway's address and accepts only the
+partner's certificate and only `POST /webhook`. Each call is then checked in this order:
+
+| check | where | refused with |
+|---|---|---|
+| certificate = the partner | zt-mtls (frontend) | handshake / 403 |
+| HMAC-SHA256(secret, `timestamp.nonce.body`) | frontend | 401 bad signature (also any change of the body) |
+| timestamp within ±300 s | frontend, and again in the database | 401 |
+| nonce never seen before | **database** (`bank.partner_nonces`) | 409 replayed request |
+| reference already credited | database (`bank.incoming`) | same values: 200 `replayed`, paid once; other values: 409 |
+| destination is a customer account, amount ≤ limit | core banking + database | 404 / 422 |
+
+The secret is generated on the i5 (`ansible/.secrets/partners/`, never committed, never logged) and
+deployed to the frontend only (root:zt-app 0640). Money moves by double entry from the partner's
+settlement account (`ZTB-PAYFLOW-00`), audited with the partner's SPIFFE ID.
+
+Try it: `make pay TO=ZTB-ALICE-01 AMOUNT=10.00`, then the attacks:
+`python3 tools/payflow.py --to ZTB-ALICE-01 --amount 1 --replay` (or `--skew -900`, `--tamper`,
+`--wrong-secret`). From the i7 (no VPN needed): copy the partner's certificate, key, secret and the
+root, and use `--url https://<entry_point>:8444/webhook`.
+
+Tests: offline, `tests/unit/test_partner.py` (webhook, replay, window, signature, roles re-checked,
+device binding, rate limit on the real services + PostgreSQL), `test_bank_sql.py` (the database
+alone refuses replays), `test_edge_generated.py` (NAT, limits, validation). Live, `make test-12`.

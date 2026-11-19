@@ -5,12 +5,17 @@ allowlist) and route (policy.yaml) checks have passed. One module, three parts:
                         come ONLY from the client certificate; nothing in the request can change them.
   core    (service-a) : business rules: input validation, roles, limits from policy.yaml.
   ledger  (service-b) : the only part that talks to PostgreSQL; reads under row-level security,
-                        moves money only through bank.transfer().
+                        moves money only through bank.transfer() / bank.incoming_payment().
+  partner (frontend)  : the webhook payment partners call from the internet (no VPN): mTLS with the
+                        partner's certificate, then an HMAC signature over timestamp + nonce + body,
+                        a time window, and a nonce the database accepts only once (anti-replay).
 
 Between the parts, the identity travels in X-ZT-* headers. They are trusted only because an inner
 service accepts nothing but its upstream node's certificate (firewall + mTLS + routes).
 Amounts are integer cents everywhere; the API shows them as "1234.56" strings.
 """
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -22,6 +27,9 @@ AMOUNT_RE = re.compile(r"^[0-9]{1,9}(\.[0-9]{1,2})?$")
 KEY_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 MONTH_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 CUSTOMER_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+REFERENCE_RE = re.compile(r"^[A-Za-z0-9-]{6,64}$")
+SIGNATURE_RE = re.compile(r"^v1=([0-9a-f]{64})$")
 WWW = os.environ.get("ZT_WWW", "/usr/local/share/zt-bank/www")
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                 ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
@@ -134,6 +142,63 @@ def static(path):
         return 200, ("raw", STATIC_TYPES[ext], fh.read())
 
 
+# --------------------------------------------------------------------------- partner --
+def webhook_signature(secret: bytes, timestamp: str, nonce: str, body: bytes) -> str:
+    """HMAC-SHA256 over "<timestamp>.<nonce>.<raw body>" (what the partner signs, byte for byte)."""
+    return hmac.new(secret, f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256).hexdigest()
+
+
+def incoming_fields(b, bank):
+    """The payment a partner announces: validated identically at the frontend and in core banking."""
+    ref, dst, amount = b.get("reference", ""), b.get("to", ""), b.get("amount", "")
+    if not (isinstance(ref, str) and REFERENCE_RE.match(ref)):
+        deny(400, "reference: 6-64 letters, digits or dashes")
+    if not (isinstance(dst, str) and ACCOUNT_RE.match(dst)):
+        deny(400, "to must be an account id like ZTB-ALICE-01")
+    if not (isinstance(amount, str) and AMOUNT_RE.match(amount)) or cents(amount) <= 0:
+        deny(400, 'amount must be a positive decimal string like "12.50"')
+    if cents(amount) > bank["max_transfer_cents"]:
+        deny(422, f"above the maximum per transfer ({money(bank['max_transfer_cents'])} {bank['currency']})")
+    return {"reference": ref, "to": dst, "amount_cents": cents(amount),
+            "description": clean_text(b.get("description", ""), 100)}
+
+
+def partner(req, t):
+    """POST /webhook. Order matters: who (certificate, done by zt-mtls), then is it really them and
+    unmodified (signature), then is it fresh (time window), then the payment; the database then
+    accepts each nonce once, so a captured request cannot be played again."""
+    if req.route != "webhook":
+        deny(501, f"route {req.route} is not part of the partner API")
+    p = (getattr(req, "listener", {}) or {}).get("partners", {}).get(req.peer_id)
+    if not p:
+        deny(403, "no webhook secret for this identity")
+    b = getattr(req, "browser", {}) or {}
+    if b.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+        deny(415, "send JSON (Content-Type: application/json)")
+    ts, nonce = req.headers.get("X-ZT-Timestamp", ""), req.headers.get("X-ZT-Nonce", "")
+    m = SIGNATURE_RE.match(req.headers.get("X-ZT-Signature", ""))
+    if not re.fullmatch(r"[0-9]{1,12}", ts):
+        deny(400, "X-ZT-Timestamp: unix time in seconds")
+    if not NONCE_RE.match(nonce):
+        deny(400, "X-ZT-Nonce: 16-64 letters, digits, - or _ (unique per request)")
+    if not m:
+        deny(401, "X-ZT-Signature missing or malformed (v1=<hex HMAC-SHA256>)")
+    try:
+        with open(p["key_file"]) as f:
+            secret = bytes.fromhex(f.read().strip())
+    except (OSError, ValueError):
+        deny(500, "webhook secret unavailable")
+    if not hmac.compare_digest(webhook_signature(secret, ts, nonce, req.raw or b""), m.group(1)):
+        deny(401, "bad signature")
+    window = int(req.listener.get("max_skew_s", 300))
+    if abs(time.time() - int(ts)) > window:
+        deny(401, f"timestamp outside the replay window (+/-{window}s)")
+    payment = incoming_fields(req.json(), t.bank)
+    payment.update(nonce=nonce, signed_at=int(ts), amount=money(payment.pop("amount_cents")))
+    ident = {"X-ZT-Actor": req.peer_id or "", "X-ZT-Role": "partner", "X-ZT-Customer": ""}
+    return passthrough(*t.api("POST", "/incoming", body=payment, headers=ident))
+
+
 # ------------------------------------------------------------------------------ core --
 def caller(req, role):
     """The end user as asserted by the upstream node. Checked again here (defense in depth)."""
@@ -212,6 +277,18 @@ def core(req, t):
         body["limits"] = {"currency": bank["currency"], "max_transfer": money(bank["max_transfer_cents"]),
                           "daily_limit": money(bank["daily_limit_cents"])}
         return status, body
+    if r == "incoming":
+        ident = caller(req, "partner")
+        b = req.json()
+        payment = incoming_fields(b, bank)
+        nonce, signed_at = b.get("nonce", ""), b.get("signed_at")
+        if not (isinstance(nonce, str) and NONCE_RE.match(nonce)) or not isinstance(signed_at, int):
+            deny(400, "nonce and signed_at are required")
+        payment.update(nonce=nonce, signed_at=signed_at)
+        status, body = passthrough(*t.api("POST", "/ledger/incoming", body=payment, headers=ident))
+        body["amount"] = money(body.pop("amount_cents"))
+        body["currency"] = bank["currency"]
+        return status, body
     deny(501, f"route {r} is not part of core banking")
 
 
@@ -276,10 +353,28 @@ def ledger(req, t):
     if r == "status":
         caller(req, "staff")
         return 200, t.db(None, "SELECT bank.status()")[0][0]
+    if r == "incoming":
+        ident = caller(req, "partner")
+        partner_id = t.bank.get("partners", {}).get(ident["X-ZT-Actor"])
+        if not partner_id:
+            deny(403, "not a payment partner")
+        b = req.json()
+        try:
+            amount_c, signed_at = int(b["amount_cents"]), int(b["signed_at"])
+        except (KeyError, TypeError, ValueError):
+            deny(400, "amount_cents and signed_at required")
+        payment_id, replayed = t.db(None, "SELECT * FROM bank.incoming_payment(%s, %s, %s, %s, %s, %s, %s, %s)",
+                                    (partner_id, ident["X-ZT-Actor"], b.get("nonce"), signed_at, b.get("reference"),
+                                     b.get("to"), amount_c, b.get("description", "")), write=True)[0]
+        t.log(f"incoming payment {payment_id} {'replayed' if replayed else 'credited'} from {ident['X-ZT-Actor']}: "
+              f"ref {b.get('reference')} -> {b.get('to')} {amount_c}")
+        return (200 if replayed else 201), {"payment_id": str(payment_id), "replayed": replayed,
+                                            "reference": b.get("reference"), "to": b.get("to"),
+                                            "amount_cents": amount_c}
     deny(501, f"route {r} is not part of the ledger")
 
 
-APPS = {"web": web, "core": core, "ledger": ledger}
+APPS = {"web": web, "core": core, "ledger": ledger, "partner": partner}
 
 
 def handle(app, req, tools):
@@ -287,7 +382,8 @@ def handle(app, req, tools):
     try:
         return APPS[app](req, tools)
     except Reply as r:
-        if r.status in (403, 404, 409, 415, 422):   # refusals worth auditing (415: CSRF attempt)
+        # refusals worth auditing (401: bad webhook signature or stale; 409: replay; 415: CSRF)
+        if r.status in (401, 403, 404, 409, 415, 422):
             # who really asked: the end user (X-ZT-Actor), and the service it came through
             user = req.headers.get("X-ZT-Actor") or req.peer_id
             via = f" via {req.peer_id}" if user != req.peer_id else ""

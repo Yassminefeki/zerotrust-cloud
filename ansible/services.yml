@@ -1,7 +1,30 @@
 # Stage 7 — the services. `make services`
 #   database: PostgreSQL, TLS 1.3, client certificate only (pg_hba from policy.yaml)
 #   frontend, service-a, service-b: zt-mtls (mTLS 1.3, SPIFFE allowlists from policy.yaml)
+#   partners (stage 12): one webhook secret per payment partner, generated on the i5 and deployed
+#   to the node that serves the partner API only.
 # Database first, so the chain works as soon as the last service starts.
+- name: Partner webhook secrets on the CLOUD host
+  hosts: localhost
+  gather_facts: false
+  vars:
+    partners: "{{ zt_pki.identities.values() | selectattr('kind', 'equalto', 'client')
+                  | selectattr('role', 'equalto', 'partner') | map(attribute='actor') | list }}"
+  tasks:
+    - name: Private directory
+      ansible.builtin.file:
+        path: "{{ zt_secrets }}/partners"
+        state: directory
+        mode: "0700"
+
+    - name: One 256-bit HMAC secret per partner (generated once, never committed, never logged)
+      ansible.builtin.shell: >-
+        f={{ (zt_secrets ~ '/partners/' ~ item ~ '.key') | quote }};
+        [ -s "$f" ] || { umask 077 && openssl rand -hex 32 > "$f" && echo created; }
+      register: secret_made
+      changed_when: "'created' in secret_made.stdout"
+      loop: "{{ partners }}"
+
 - name: PostgreSQL
   hosts: postgres
   become: true

@@ -34,7 +34,8 @@ def frontend_node():
 
 def frontend_url(path):
     """The one service the tunnel may reach, from the policy (10.20.0.10:8443)."""
-    s = next(iter(mtls(frontend_node())["serves"].values()))
+    serves = mtls(frontend_node())["serves"].values()
+    s = next((v for v in serves if v.get("app") == "web"), None) or next(iter(serves))
     return f"https://{s['listen']}{path}"
 
 
@@ -70,9 +71,30 @@ def ensure_peer():
     return NS
 
 
-def probe_tunnel(url, cert=None, key=None, extra=(), method="GET", data=None):
-    """tls_probe.py from inside the test peer's netns (= a client coming through WireGuard)."""
-    cmd = ["sudo", "-n", "ip", "netns", "exec", NS, "python3", str(TESTS / "tls_probe.py"),
+def netns_of(cert):
+    """The namespace a client certificate is used from: its actor's device if it is bound to one
+    (the statements bot: zt-bot), else the test peer."""
+    if cert:
+        return PKI.get("identities", {}).get(Path(cert).parent.name, {}).get("netns") or NS
+    return NS
+
+
+def ensure_ns(ns):
+    """Bring up a peer's namespace (zt-peer, or a device such as zt-bot) if it is not there."""
+    if ns == NS:
+        return ensure_peer()
+    if ns not in run(["ip", "netns", "list"]).stdout.split():
+        peer = next(p for p in WG["peers"] if p.get("netns") == ns)
+        conf = BUILD / "export" / peer["name"] / "wg0.conf"
+        run([str(ROOT / "tools/zt-test-peer"), "up", str(conf), ns], sudo=True, check=True)
+    return ns
+
+
+def probe_tunnel(url, cert=None, key=None, extra=(), method="GET", data=None, ns=None):
+    """tls_probe.py from inside a peer's netns (= a client coming through WireGuard): the test peer,
+    or the device the certificate is bound to (`ns` overrides, e.g. a stolen bot certificate)."""
+    ns = ensure_ns(ns or netns_of(cert))
+    cmd = ["sudo", "-n", "ip", "netns", "exec", ns, "python3", str(TESTS / "tls_probe.py"),
            "--url", url, "--ca", str(ROOT_CA)]
     if cert:
         cmd += ["--cert", str(cert), "--key", str(key)]

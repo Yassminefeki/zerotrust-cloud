@@ -94,11 +94,12 @@ def test_mgmt_never_reaches_business_ports(build):
                     f"{node}: mgmt rule on business port: {l}"
 
 
-def test_only_wireguard_is_open_to_anything(build):
+def test_only_wireguard_and_the_published_partner_port_are_open_to_anything(build):
     for node in NODES:
         for l in nft(build, node).splitlines():
             if " accept" in l and "dport" in l and "saddr" not in l:
-                assert node == "gateway" and "udp dport 51820" in l
+                assert node == "gateway" and ("udp dport 51820" in l or
+                                              ("tcp dport 8444 ct status dnat" in l and '"wan0" oifname "dmz0"' in l)), l
 
 
 # ------------------------------------------------------------------- host --
@@ -185,7 +186,8 @@ def test_wireguard_json(build):
     wg = json.loads((build / "wireguard/wireguard.json").read_text())
     assert wg["server"] == "gateway" and wg["iface"] == "wg0" and wg["port"] == 51820
     assert wg["address"] == "10.10.0.1/24" and wg["endpoint_ip"] == "192.168.122.10"
-    assert [(p["name"], p["test"]) for p in wg["peers"]] == [("i7", False), ("test-peer", True)]
+    assert [(p["name"], p["test"]) for p in wg["peers"]] == [("i7", False), ("bot", False), ("test-peer", True)]
+    assert wg["peers"][1]["netns"] == "zt-bot" and wg["peers"][1]["conn_limit"] == "5/second"
     assert wg["reachable"] == ["10.20.0.10/32"]
 
 
@@ -315,7 +317,8 @@ def test_host_json(build):
     h = json.loads((build / "host/host.json").read_text())
     assert h["wan_bridge"] == "virbr-zt-wan"
     assert h["host_services"] == ["tcp/3142"]
-    assert h["dnat"] == [{"proto": "udp", "to": "192.168.122.10:51820"}]
+    assert h["dnat"] == [{"proto": "udp", "port": 51820, "to": "192.168.122.10:51820", "flow": "wg-ingress"},
+                         {"proto": "tcp", "port": 8444, "to": "192.168.122.10:8444", "flow": "partner-webhook"}]
 
 
 # ---------------------------------------------------- stage 2: terraform --
@@ -352,7 +355,7 @@ def test_pki_identities_and_ca_policy(build):
     ids = pki["identities"]
     # only nodes that take part in mTLS get a cert; never the gateway or the CA itself
     assert set(ids) == {"frontend", "service-a", "service-b", "database",
-                        "customer-alice", "customer-bob", "staff-dev", "bot-statements"}
+                        "customer-alice", "customer-bob", "staff-dev", "bot-statements", "partner-payflow"}
     assert ids["service-b"]["uri"] == "spiffe://cloud.local/service-b"
     assert ids["service-b"]["ips"] == ["10.30.0.12", "10.40.0.11"], "data-plane IPs only, no mgmt"
     a = ids["customer-alice"]
@@ -395,8 +398,9 @@ def test_inner_routes_only_for_the_upstream_node(build):
 def test_actor_directory_on_the_frontend(build):
     actors = mtls(build, "frontend")["actors"]
     assert actors["spiffe://cloud.local/customer/alice"] == {"actor": "alice", "role": "customer", "customer": "alice",
-                                                             "name": "Alice Martin"}
-    assert actors["spiffe://cloud.local/staff/dev"] == {"actor": "dev", "role": "staff", "name": "dev"}
+                                                             "name": "Alice Martin", "rate_per_min": 240}
+    assert actors["spiffe://cloud.local/staff/dev"] == {"actor": "dev", "role": "staff", "name": "dev",
+                                                         "rate_per_min": 240}
     assert mtls(build, "service-a")["actors"] == {}, "inner services only know nodes"
 
 

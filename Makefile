@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -149,11 +149,36 @@ test-11: venv gen client-certs  ## stage 11: website live, CSRF refusals, Firefo
 	sudo -v
 	$(PYTEST) tests/web -v
 
+# --------------------------------------------------------------- stage 12 --
+BOT_CN   := bot-statements
+BOT_URL   = $(shell python3 -c "import json; print(json.load(open('$(BUILD)/pki/pki.json'))['identities']['$(BOT_CN)']['web_url'])")
+
+bot: venv gen  ## stage 12: the statements bot's own namespace on the i5 (zt-bot: its WireGuard peer only)
+	sudo tools/zt-test-peer up $(BUILD)/export/bot/wg0.conf zt-bot
+
+bot-down:  ## remove the bot's namespace
+	sudo tools/zt-test-peer down zt-bot
+
+bot-run: client-certs bot  ## run the bot once: fresh 1h certificate, statements -> build/bot/
+	sudo ip netns exec zt-bot python3 tools/zt-bot.py --url $(BOT_URL) --out $(BUILD)/bot \
+	  --cert ansible/.secrets/pki/$(BOT_CN)/client.crt --key ansible/.secrets/pki/$(BOT_CN)/client.key \
+	  --ca $(BUILD)/pki/root_ca.crt
+	sudo chown -R $$(id -u):$$(id -g) $(BUILD)/bot
+
+TO     ?= ZTB-ALICE-01
+AMOUNT ?= 10.00
+pay: venv gen  ## stage 12: PayFlow pays a customer from outside, no VPN (TO=ZTB-ALICE-01 AMOUNT=10.00)
+	$(PY) tools/payflow.py --to $(TO) --amount $(AMOUNT) --description "make pay"
+
+test-12: venv gen client-certs  ## stage 12: bot (netns, device, rate limits), partner webhook (signature, anti-replay)
+	sudo -v
+	$(PYTEST) tests/edge -v
+
 # ----------------------------------------------------------------- pipeline --
-up: host infra ca firewall wireguard certs services  ## build everything, in the safe order
+up: host infra ca firewall wireguard certs services bot  ## build everything, in the safe order
 	@echo ">> up: done. Next: make test"
 
-test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9 test-10 test-11  ## run every test, stage by stage
+test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9 test-10 test-11 test-12  ## run every test, stage by stage
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
 	# -refresh=false: nothing needs reading back before deletion, and the provider fails the

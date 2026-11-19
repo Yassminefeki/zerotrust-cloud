@@ -84,10 +84,12 @@ def test_wireguard_accept_precedes_libvirt_reject():
         assert rules and "zt:wg-ingress" in rules[0], "\n".join(rules)
         return
     rules = [l for l in r.stdout.splitlines() if l.startswith("-A FORWARD")]
-    ours = [i for i, l in enumerate(rules) if "zt:wg-ingress" in l]
     jump = [i for i, l in enumerate(rules) if l.endswith("-j LIBVIRT_FWI")]
-    assert len(ours) == 1, "exactly one copy of the WireGuard accept:\n" + "\n".join(rules)
-    assert jump and ours[0] < jump[0], "accept must precede the jump to LIBVIRT_FWI:\n" + "\n".join(rules)
+    # one accept per flow published from the internet (WireGuard, and the partner API since stage 12)
+    for flow in [d["flow"] for d in json.loads((BUILD / "host/host.json").read_text())["dnat"]]:
+        ours = [i for i, l in enumerate(rules) if f"zt:{flow}" in l]
+        assert len(ours) == 1, f"exactly one copy of the {flow} accept:\n" + "\n".join(rules)
+        assert jump and ours[0] < jump[0], "accept must precede the jump to LIBVIRT_FWI:\n" + "\n".join(rules)
 
 
 def test_libvirt_reject_still_guards_other_inbound():

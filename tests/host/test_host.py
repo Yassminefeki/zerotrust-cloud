@@ -95,8 +95,9 @@ def test_host_rules_service_enabled_and_active():
 def test_dnat_by_interface_name(env, zt_host):
     table = run(["nft", "list", "table", "inet", "zt_host"], sudo=True, check=True).stdout
     for d in zt_host["dnat"]:
+        port = env["wan_port"] if d["proto"] == "udp" else d["port"]   # WireGuard: env; partner API: policy
         assert re.search(rf'iifname "{re.escape(env["wan_interface"])}" {d["proto"]} dport '
-                         rf'{env["wan_port"]} dnat ip to {re.escape(d["to"])}', table), table
+                         rf'{port} dnat ip to {re.escape(d["to"])}', table), table
     # by NAME only: no address of the WAN interface appears in the table
     for ip in _wan_ipv4s(env["wan_interface"]):
         assert ip not in table

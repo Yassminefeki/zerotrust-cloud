@@ -247,6 +247,7 @@ def test_stolen_private_key_without_psk_gets_nothing(tmp_path):
 
 def test_dnat_target_is_the_wireguard_endpoint(zt_host):
     """The i5's WAN DNAT (stage 1/2) points at the address and port the gateway listens on."""
-    assert {"proto": "udp", "to": f"{WG['endpoint_ip']}:{WG['port']}"} in zt_host["dnat"]
+    assert {"proto": "udp", "to": f"{WG['endpoint_ip']}:{WG['port']}"} in [
+        {"proto": d["proto"], "to": d["to"]} for d in zt_host["dnat"]]
     live = run(["nft", "list", "table", "inet", "zt_host"], sudo=True, check=True).stdout
     assert f"dnat ip to {WG['endpoint_ip']}:{WG['port']}" in live

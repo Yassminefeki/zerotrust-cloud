@@ -34,6 +34,7 @@ leaf alice     "URI:$TD/customer/alice,DNS:customer-alice"
 leaf bob       "URI:$TD/customer/bob,DNS:customer-bob"
 leaf dev       "URI:$TD/staff/dev,DNS:staff-dev"
 leaf bot       "URI:$TD/bot/statements,DNS:bot-statements"
+leaf payflow   "URI:$TD/partner/payflow,DNS:partner-payflow"
 """
 
 

@@ -24,7 +24,8 @@ pytestmark = pytest.mark.web
 
 WWW = ROOT / "ansible/roles/app/files/www"
 SITE = sorted(p.name for p in WWW.iterdir())
-ACTORS = sorted(i["actor"] for i in PKI.get("identities", {}).values() if i.get("kind") == "client")
+# the actors who use the website (through the tunnel): every client identity with a web_url
+ACTORS = sorted(i["actor"] for i in PKI.get("identities", {}).values() if i.get("web_url"))
 EXPORTED = sorted((i["export_to"], i["actor"], cn) for cn, i in PKI.get("identities", {}).items() if i.get("export_to"))
 SECRETS = ROOT / "ansible/.secrets/pki"
 

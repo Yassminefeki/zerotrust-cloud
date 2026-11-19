@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# zt-test-peer up|down|status CONF — the hostile WireGuard test client on the i5 (run as root).
+# zt-test-peer up CONF [NS] | down [NS] | status [NS] — a WireGuard client in its own network
+# namespace on the i5 (run as root). NS defaults to zt-peer, the hostile test client; the statements
+# bot uses the same mechanism in zt-bot (`make bot`), with its own key and a real client's routes.
 #
-# Network namespace "zt-peer" whose ONLY interface is the tunnel:
+# Network namespace "$NS" whose ONLY interface is the tunnel:
 #   * the WireGuard interface is created in the host namespace and then MOVED into zt-peer.
 #     Its encrypted UDP socket stays in the host namespace (that is how WireGuard works), so the
 #     ciphertext leaves via virbr-zt-wan, while everything run inside zt-peer can only use wg.
 #   * every AllowedIPs network of CONF is routed into the tunnel, so whatever the gateway may not
 #     forward must be refused BY THE GATEWAY (cryptokey routing + nftables), not by local routes.
 set -euo pipefail
-NS=zt-peer
-DEV=wg-zt-peer
 cmd=${1:-}
-conf=${2:-}
+if [ "$cmd" = up ]; then conf=${2:-}; NS=${3:-zt-peer}; else conf=; NS=${2:-zt-peer}; fi
+[[ "$NS" =~ ^zt-[a-z0-9-]{1,8}$ ]] || { echo "zt-test-peer: bad namespace name $NS" >&2; exit 1; }
+DEV="wg-$NS"
 
 die() { echo "zt-test-peer: $*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
@@ -36,7 +38,7 @@ case "$cmd" in
     ip -n "$NS" addr add "$addr" dev "$DEV"
     ip -n "$NS" link set "$DEV" up
     for r in $routes; do ip -n "$NS" route add "$r" dev "$DEV"; done
-    echo "zt-test-peer: up ($addr in netns $NS)"
+    echo "zt-test-peer: up ($addr in netns $NS, routes: $routes)"
     ;;
   down)
     down
@@ -48,6 +50,6 @@ case "$cmd" in
     ip -n "$NS" route
     ;;
   *)
-    die "usage: $0 up CONF | down | status"
+    die "usage: $0 up CONF [NS] | down [NS] | status [NS]"
     ;;
 esac

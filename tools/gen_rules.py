@@ -198,6 +198,12 @@ def validate_policy(policy: dict) -> list[str]:
             errs.append(f"wireguard peer {peer['name']}: test must be true/false")
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", str(peer["name"])):
             errs.append(f"wireguard peer {peer['name']}: name must be a lowercase DNS label")
+        if "netns" in peer and not re.fullmatch(r"zt-[a-z0-9-]{1,8}", str(peer["netns"])):
+            errs.append(f"wireguard peer {peer['name']}: netns must look like zt-<name> (max 11 chars)")
+        if "conn_limit" in peer:
+            m = RATE_RE.match(str(peer["conn_limit"]))
+            if not m or m.group(2) not in ("s", "second"):
+                errs.append(f"wireguard peer {peer['name']}: conn_limit must look like 5/second")
         peer_ips.add(peer["ip"])
     peers = policy.get("wireguard", {}).get("peers", [])
     if peers and not any(not p.get("test") for p in peers):
@@ -207,7 +213,17 @@ def validate_policy(policy: dict) -> list[str]:
 
 
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-APPS = {"web", "core", "ledger"}
+APPS = {"web", "core", "ledger", "partner"}
+RATE_RE = re.compile(r"^([1-9][0-9]{0,5})/(s|second|min|minute|h|hour)$")
+PER_MIN = {"s": 60, "second": 60, "min": 1, "minute": 1, "h": 1 / 60, "hour": 1 / 60}
+
+
+def per_minute(rate: str) -> float:
+    """'240/min' -> 240.0, '5/second' -> 300.0"""
+    m = RATE_RE.match(str(rate))
+    if not m:
+        raise ValueError(rate)
+    return int(m.group(1)) * PER_MIN[m.group(2)]
 AMOUNT_RE = re.compile(r"\d{1,9}(\.\d{1,2})?")
 
 
@@ -217,14 +233,25 @@ def cents(amount: str) -> int:
     return int(whole) * 100 + int((frac + "00")[:2])
 
 
+def partner_account(name: str) -> str:
+    return f"ZTB-{name.upper().replace('-', '')[:12]}-00"
+
+
 def render_bank(policy: dict) -> dict:
     """Business limits + customers, for the services and the database seed."""
     b = policy.get("bank", {})
     return {"currency": b.get("currency", "EUR"),
             "max_transfer_cents": cents(b.get("max_transfer", "0")),
             "daily_limit_cents": cents(b.get("daily_limit", "0")),
+            "webhook_max_skew_s": policy.get("webhook", {}).get("max_skew_seconds", 300),
             "customers": [{"id": a["customer"], "full_name": a["full_name"]}
-                          for a in policy.get("actors", {}).values() if a.get("role") == "customer"]}
+                          for a in policy.get("actors", {}).values() if a.get("role") == "customer"],
+            # each payment partner settles through its own account of the bank
+            "partners": [{"id": n, "name": a.get("full_name", n), "account": partner_account(n),
+                          "identity": actor_uri(policy, n)}
+                         for n, a in policy.get("actors", {}).items() if a.get("role") == "partner"]}
+
+
 LIFETIME_RE = re.compile(r"^(\d+)([hm])$")
 
 
@@ -257,6 +284,13 @@ def validate_actors_and_routes(policy: dict) -> list[str]:
             errs.append(f"actor {name}: `customer` is required for, and only for, role customer")
         if "export_to" in a and (a["export_to"] not in peers or peers[a["export_to"]].get("test")):
             errs.append(f"actor {name}: export_to must be a real (non-test) WireGuard peer")
+        if "device" in a:
+            if a.get("entry") != "tunnel":
+                errs.append(f"actor {name}: device binds a tunnel identity to a WireGuard peer (entry: tunnel)")
+            elif a["device"] not in peers or peers[a["device"]].get("test"):
+                errs.append(f"actor {name}: device must be a real (non-test) WireGuard peer")
+        if a.get("role") == "partner" and a.get("entry") != "internet":
+            errs.append(f"actor {name}: partners come from the internet (entry: internet), not through the VPN")
         if "cert_lifetime" in a:
             try:
                 if _hours(a["cert_lifetime"]) > max_h:
@@ -269,6 +303,12 @@ def validate_actors_and_routes(policy: dict) -> list[str]:
     for svc_name, svc in policy["services"].items():
         if "app" in svc and svc["app"] not in APPS:
             errs.append(f"service {svc_name}: app must be one of {sorted(APPS)}")
+    for rname, r in roles.items():
+        if "rate_limit" in r and not RATE_RE.match(str(r["rate_limit"])):
+            errs.append(f"role {rname}: rate_limit must look like 240/min")
+    skew = policy.get("webhook", {}).get("max_skew_seconds", 300)
+    if not isinstance(skew, int) or not 30 <= skew <= 3600:
+        errs.append("webhook: max_skew_seconds must be an integer between 30 and 3600")
     bank = policy.get("bank")
     if bank is not None:
         if not re.fullmatch(r"[A-Z]{3}", str(bank.get("currency", ""))):
@@ -339,6 +379,11 @@ class Rule:
     router_out: str | None = None
     mtls: bool = False
     allowed_ids: list[str] = field(default_factory=list)
+    # published from the internet THROUGH a router (not a VPN): the router DNATs `published`
+    # (its own address on the source network) to dst, and SNATs to `snat` (its address on the
+    # destination network), so the destination sees, and answers, the router only.
+    published: str | None = None
+    snat: str | None = None
 
 
 def _src_endpoint(policy, name, network_hint):
@@ -422,11 +467,16 @@ def resolve(policy: dict) -> list[Rule]:
                             continue
                         rin = policy["networks"][src_net]["iface"]
                         rout = policy["networks"][dst.network]["iface"]
+                    published = snat = None
+                    if router and src.addr == "0.0.0.0/0":
+                        r_ifs = policy["nodes"][router]["interfaces"]
+                        published, snat = r_ifs[src.network], r_ifs[dst.network]
                     rules.append(Rule(
                         name=f["name"], section=section, service=f["to"], src=src, dst=dst,
                         port=svc["port"], proto=svc["proto"], router=router,
                         router_in=rin, router_out=rout, mtls=bool(svc.get("mtls")),
-                        allowed_ids=_identities(policy, s) if svc.get("mtls") else []))
+                        allowed_ids=_identities(policy, s) if svc.get("mtls") else [],
+                        published=published, snat=snat))
     if errs:
         raise PolicyError(errs)
     return rules
@@ -440,13 +490,23 @@ def _saddr(ep: Endpoint) -> str:
 
 
 def render_node_nft(policy: dict, node: str, rules: list[Rule]) -> str:
-    inp, fwd, out = [], [], []
+    inp, fwd, out, pre, post = [], [], [], [], []
+    nets = policy["networks"]
+    # per-peer connection limits, before any accept of the router that forwards the tunnel
+    if "tunnel" in policy["nodes"][node]["interfaces"]:
+        for p in policy.get("wireguard", {}).get("peers", []):
+            if "conn_limit" in p:
+                n = int(RATE_RE.match(p["conn_limit"]).group(1))
+                fwd.append(f'iifname "{nets["tunnel"]["iface"]}" ip saddr {p["ip"]} ct state new '
+                           f'limit rate over {n}/second burst {2 * n} packets drop '
+                           f'comment "peer:{p["name"]}:conn-limit"')
     for r in rules:
         match = f"{r.proto} dport {r.port}"
         c = f'comment "{r.section}:{r.name}"'
         if r.dst.kind == "node" and r.dst.name == node:
             iif = r.dst.iface
-            inp.append(f'iifname "{iif}" {_saddr(r.src)}ip daddr {r.dst.addr} {match} ct state new accept {c}')
+            src = f"ip saddr {r.snat} " if r.snat else _saddr(r.src)
+            inp.append(f'iifname "{iif}" {src}ip daddr {r.dst.addr} {match} ct state new accept {c}')
             if r.proto == "udp":
                 # UDP server (WireGuard) may originate handshakes from its port after conntrack expiry.
                 out.append(f'oifname "{iif}" ip saddr {r.dst.addr} udp sport {r.port} accept {c}')
@@ -458,8 +518,14 @@ def render_node_nft(policy: dict, node: str, rules: list[Rule]) -> str:
             out.append(f'oifname "{r.src.iface}" ip saddr {r.src.addr} ip daddr {r.dst.addr} {match} '
                        f'ct state new accept {c}')
         if r.router == node:
+            dnat = "ct status dnat " if r.published else ""
             fwd.append(f'iifname "{r.router_in}" oifname "{r.router_out}" {_saddr(r.src)}'
-                       f'ip daddr {r.dst.addr} {match} ct state new accept {c}')
+                       f'ip daddr {r.dst.addr} {match} {dnat}ct state new accept {c}')
+            if r.published:
+                pre.append(f'iifname "{r.router_in}" ip daddr {r.published} {match} '
+                           f'dnat ip to {r.dst.addr}:{r.port} {c}')
+                post.append(f'oifname "{r.router_out}" ip daddr {r.dst.addr} {match} ct status dnat '
+                            f'snat ip to {r.snat} {c}')
 
     def chain(name, hook, body, lo):
         lines = [f"  chain {name} {{",
@@ -480,8 +546,27 @@ def render_node_nft(policy: dict, node: str, rules: list[Rule]) -> str:
     text += chain("forward", "forward", fwd, None)
     text.append("")
     text += chain("output", "output", out, "oifname")
+    # published services (partner API): address translation on the router, same table
+    for name, hook, prio, body in (("prerouting", "prerouting", "dstnat", pre),
+                                   ("postrouting", "postrouting", "srcnat", post)):
+        if body:
+            text += ["", f"  chain {name} {{", f"    type nat hook {hook} priority {prio}; policy accept;"]
+            text += [f"    {b}" for b in body]
+            text.append("  }")
     text.append("}")
     return "\n".join(text) + "\n"
+
+
+def entry_target(r: Rule) -> tuple[str, int]:
+    """Where the i5 forwards an internet flow: the VM that receives it on the NAT network
+    (the gateway itself for WireGuard, the gateway's published address for the partner API)."""
+    return (r.published or r.dst.addr), r.port
+
+
+def wan_port(env: dict, r: Rule) -> int:
+    """Port on the i5's WAN interface: env wan_port for WireGuard (the i7's config uses it),
+    the service port for published services."""
+    return int(env["wan_port"]) if r.proto == "udp" else r.port
 
 
 def render_host_nft(policy: dict, env: dict, rules: list[Rule]) -> str:
@@ -497,14 +582,16 @@ def render_host_nft(policy: dict, env: dict, rules: list[Rule]) -> str:
              "  chain prerouting {",
              "    type nat hook prerouting priority dstnat; policy accept;"]
     for r in wg:
-        lines.append(f'    iifname "{env["wan_interface"]}" {r.proto} dport {int(env["wan_port"])} '
-                     f'dnat ip to {r.dst.addr}:{r.port} comment "flows:{r.name}"')
+        ip, port = entry_target(r)
+        lines.append(f'    iifname "{env["wan_interface"]}" {r.proto} dport {wan_port(env, r)} '
+                     f'dnat ip to {ip}:{port} comment "flows:{r.name}"')
     lines += ["  }", "",
               "  chain forward {",
               "    type filter hook forward priority filter - 10; policy accept;"]
     for r in wg:
-        lines.append(f'    iifname "{env["wan_interface"]}" oifname "{nets[r.dst.network]["bridge"]}" '
-                     f'ip daddr {r.dst.addr} {r.proto} dport {r.port} ct status dnat accept '
+        ip, port = entry_target(r)
+        lines.append(f'    iifname "{env["wan_interface"]}" oifname "{nets[r.src.network]["bridge"]}" '
+                     f'ip daddr {ip} {r.proto} dport {port} ct status dnat accept '
                      f'comment "flows:{r.name}"')
     lines += ["  }", "",
               "  chain input {",
@@ -532,12 +619,14 @@ def render_libvirt_hook(policy: dict, env: dict, rules: list[Rule]) -> str:
     wg = [r for r in rules if r.src.name == "internet"]
     wan_bridge = nets["wan"]["bridge"]
     ipt, nft = [], []
-    for r in wg:
-        ipt.append(f'-i {env["wan_interface"]} -o {wan_bridge} -d {r.dst.addr}/32 -p {r.proto} '
-                   f'--dport {r.port} -m conntrack --ctstate DNAT '
+    # each rule is INSERTED at the top: reversed, so the final order is the policy's (WireGuard first)
+    for r in reversed(wg):
+        ip, port = entry_target(r)
+        ipt.append(f'-i {env["wan_interface"]} -o {wan_bridge} -d {ip}/32 -p {r.proto} '
+                   f'--dport {port} -m conntrack --ctstate DNAT '
                    f'-m comment --comment zt:{r.name} -j ACCEPT')
-        nft.append(f'iifname "{env["wan_interface"]}" oifname "{wan_bridge}" ip daddr {r.dst.addr} '
-                   f'{r.proto} dport {r.port} ct status dnat counter accept comment "zt:{r.name}"')
+        nft.append(f'iifname "{env["wan_interface"]}" oifname "{wan_bridge}" ip daddr {ip} '
+                   f'{r.proto} dport {port} ct status dnat counter accept comment "zt:{r.name}"')
     body = ["#!/bin/bash",
             GENERATED_HEADER.rstrip(),
             "# Installed as /etc/libvirt/hooks/network.d/zerotrust. Args: <network> <op> <sub-op>.",
@@ -582,8 +671,9 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
             for i in r.allowed_ids:
                 if i not in s["allowed_ids"]:
                     s["allowed_ids"].append(i)
-            if r.src.addr not in s["allowed_sources"]:
-                s["allowed_sources"].append(r.src.addr)
+            src = r.snat or r.src.addr      # a published service only ever sees its router
+            if src not in s["allowed_sources"]:
+                s["allowed_sources"].append(src)
         if r.src.kind == "node" and r.src.name == node:
             calls[r.service] = {"address": f"{r.dst.addr}:{r.port}",
                                 "expected_id": spiffe(policy, r.dst.name)}
@@ -606,17 +696,35 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
         for a, spec in policy.get("actors", {}).items():
             uri = actor_uri(policy, a)
             if uri in entry["allowed_ids"]:
+                role = policy["roles"][spec["role"]]
                 actors[uri] = {"actor": a, "role": spec["role"], "name": spec.get("full_name", a),
-                               **({"customer": spec["customer"]} if "customer" in spec else {})}
+                               **({"customer": spec["customer"]} if "customer" in spec else {}),
+                               **({"rate_per_min": per_minute(role["rate_limit"])} if "rate_limit" in role else {}),
+                               **({"sources": [f'{peer_ip(policy, spec["device"])}/32']} if "device" in spec else {})}
     for name, entry in serves.items():
         if "app" in policy["services"][name]:
             entry["app"] = policy["services"][name]["app"]
+        if entry.get("app") == "partner":
+            # the shared webhook secret of each partner allowed here (file deployed by Ansible)
+            entry["partners"] = {actor_uri(policy, a): {"partner": a, "key_file": f"/etc/zt/partners/{a}.key"}
+                                 for a, spec in policy["actors"].items()
+                                 if spec["role"] == "partner" and actor_uri(policy, a) in entry["allowed_ids"]}
+            entry["max_skew_s"] = policy.get("webhook", {}).get("max_skew_seconds", 300)
     out = {"node": node, "identity": spiffe(policy, node), "min_tls": policy["cert"]["min_tls"],
            "serves": serves, "calls": calls, "actors": actors}
     if any("app" in e for e in serves.values()):
         bank = render_bank(policy)
         out["bank"] = {k: bank[k] for k in ("currency", "max_transfer_cents", "daily_limit_cents")}
+        out["bank"]["partners"] = {p["identity"]: p["id"] for p in bank["partners"]}
     return out
+
+
+def netns_of_peer(policy: dict, name: str | None) -> str | None:
+    return next((p.get("netns") for p in policy.get("wireguard", {}).get("peers", []) if p["name"] == name), None)
+
+
+def peer_ip(policy: dict, name: str) -> str:
+    return next(p["ip"] for p in policy["wireguard"]["peers"] if p["name"] == name)
 
 
 def render_pg_hba(policy: dict, rules: list[Rule]) -> str:
@@ -674,6 +782,11 @@ def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
         if peer.get("test"):
             endpoint = f"{gw_ifs[wg_svc['network']]}:{port}"   # direct, on the libvirt NAT network
             allowed = everything
+        elif peer.get("netns"):
+            # lives on the i5 itself (a host cannot DNAT its own Wi-Fi traffic): direct endpoint,
+            # but a REAL client: it routes only what the policy lets the tunnel reach
+            endpoint = f"{gw_ifs[wg_svc['network']]}:{port}"
+            allowed = reachable
         else:
             endpoint = f"{env['entry_point']}:{int(env['wan_port'])}"   # DNAT on the i5's WAN NIC
             allowed = reachable
@@ -690,7 +803,9 @@ def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
     out["wireguard.json"] = json.dumps({
         "server": gw, "iface": nets["tunnel"].get("iface", "wg0"), "address": f"{gw_tun}/{prefix}",
         "port": port, "endpoint_ip": gw_ifs[wg_svc["network"]],
-        "peers": [{"name": p["name"], "ip": p["ip"], "test": bool(p.get("test", False))} for p in peers],
+        "peers": [{"name": p["name"], "ip": p["ip"], "test": bool(p.get("test", False)),
+                   **({"netns": p["netns"]} if "netns" in p else {}),
+                   **({"conn_limit": p["conn_limit"]} if "conn_limit" in p else {})} for p in peers],
         "reachable": reachable,
     }, indent=2) + "\n"
     return out
@@ -729,7 +844,11 @@ def render_pki(policy: dict, rules: list[Rule]) -> dict:
         renew_s = int(min(_hours(policy["cert"]["renew_before"]), _hours(life) / 3) * 3600)
         identities[cn] = {"cn": cn, "uri": uri, "dns": [cn], "ips": [], "kind": "client",
                           "actor": a, "role": spec["role"], "name": spec.get("full_name", a),
-                          "lifetime": life, "renew_before_s": renew_s, "web_url": web_url,
+                          "lifetime": life, "renew_before_s": renew_s,
+                          **({"web_url": web_url} if spec.get("entry") == "tunnel" else {}),
+                          **({"device": spec["device"]} if "device" in spec else {}),
+                          **({"netns": netns_of_peer(policy, spec["device"])}
+                             if netns_of_peer(policy, spec.get("device")) else {}),
                           **({"export_to": spec["export_to"]} if "export_to" in spec else {})}
     all_ips = sorted({ip for i in identities.values() for ip in i["ips"]},
                      key=lambda x: ipaddress.ip_address(x))
@@ -896,7 +1015,8 @@ def generate(policy: dict, env: dict, out: Path) -> dict[str, str]:
         "zt_bridges": [s["bridge"] for s in policy["networks"].values() if "bridge" in s],
         "policy_cidrs": [s["cidr"] for s in policy["networks"].values()],
         "host_services": sorted({f"{r.proto}/{r.port}" for r in rules if r.dst.kind == "host"}),
-        "dnat": [{"proto": r.proto, "to": f"{r.dst.addr}:{r.port}"} for r in rules if r.src.name == "internet"],
+        "dnat": [{"proto": r.proto, "port": wan_port(env, r), "to": "%s:%d" % entry_target(r), "flow": r.name}
+                 for r in rules if r.src.name == "internet"],
     }, indent=2) + "\n"
     for name, text in render_wireguard(policy, env).items():
         files[f"wireguard/{name}"] = text

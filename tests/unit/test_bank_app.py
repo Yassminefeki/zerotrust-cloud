@@ -27,6 +27,7 @@ from unit_helpers import PKI_SH, ROOT, TD  # noqa: F401  (TD, PKI_SH: shared wit
 jinja2 = pytest.importorskip("jinja2")
 
 SERVICE = ROOT / "ansible/roles/app/files/zt-mtls"
+PARTNER_KEY = "0f" * 32          # the test partner's webhook secret (hex, like the generated one)
 IP = {"frontend": "127.0.0.10", "service-a": "127.0.0.11", "service-b": "127.0.0.12", "database": "127.0.0.13"}
 
 
@@ -115,11 +116,22 @@ ssl_min_protocol_version = 'TLSv1.3'
     ports = {n: free_port(IP[n]) for n in ("frontend", "service-a", "service-b")}
     nxt = {"frontend": ("service-a", "api-a"), "service-a": ("service-b", "api-b")}
     procs = []
+    partner_port = free_port(IP["frontend"])
+    (d / "partners").mkdir()
     for node in ("service-b", "service-a", "frontend"):
         m = json.loads((build / f"nodes/{node}/mtls.json").read_text())
-        for s in m["serves"].values():
-            s["listen"], s["port"] = f"{IP[node]}:{ports[node]}", ports[node]
+        for name, s in m["serves"].items():
+            lport = partner_port if s.get("app") == "partner" else ports[node]
+            s["listen"], s["port"] = f"{IP[node]}:{lport}", lport
             s["allowed_sources"] = ["127.0.0.0/8"] if node == "frontend" else ["127.0.0.1"]
+        for a in m.get("actors", {}).values():          # device-bound identities: their device is here
+            if "sources" in a:
+                a["sources"] = ["127.0.0.1/32"]
+        for name, s in m["serves"].items():
+            for uri, p in s.get("partners", {}).items():     # the shared webhook secret, per partner
+                key = d / "partners" / f"{p['partner']}.key"
+                key.write_text(PARTNER_KEY + "\n")
+                p["key_file"] = str(key)
         for name, c in m["calls"].items():
             if c.get("protocol") == "postgres":
                 c["address"] = f"{IP['database']}:{port}"
@@ -137,21 +149,26 @@ ssl_min_protocol_version = 'TLSv1.3'
                                       stdout=open(d / f"{node}.log", "w"), stderr=subprocess.STDOUT,
                                       env=dict(os.environ, ZT_WWW=str(d / "www"))))
         wait_port(IP[node], ports[node])
-    yield {"dir": d, "url": f"{IP['frontend']}:{ports['frontend']}", "ports": ports, "pg": (pg, port, psql)}
+    yield {"dir": d, "url": f"{IP['frontend']}:{ports['frontend']}", "ports": ports, "pg": (pg, port, psql),
+           "partner_url": f"{IP['frontend']}:{partner_port}"}
     for p in procs:
         p.terminate()
         p.wait(5)
     subprocess.run(pre + [pg_bin("pg_ctl"), "-D", str(pg / "data"), "-m", "fast", "stop"], capture_output=True)
 
 
-def call(bank, who, method, path, body=None, headers=None, to="frontend", raw=None):
+def call(bank, who, method, path, body=None, headers=None, to="frontend", raw=None, src=None):
+    """`to`: frontend | partner (the frontend's partner listener) | service-a | service-b.
+    `src`: the client's own address (another "device")."""
     d = bank["dir"]
-    host = IP[to]
-    port = bank["ports"][to] if to != "frontend" else int(bank["url"].rsplit(":", 1)[1])
+    host = IP["frontend" if to == "partner" else to]
+    port = (int(bank["partner_url"].rsplit(":", 1)[1]) if to == "partner" else
+            bank["ports"][to] if to != "frontend" else int(bank["url"].rsplit(":", 1)[1]))
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.load_verify_locations(d / "root.crt")
     ctx.load_cert_chain(d / f"{who}.crt", d / f"{who}.key")
-    c = http.client.HTTPSConnection(host, port, context=ctx, timeout=20)
+    c = http.client.HTTPSConnection(host, port, context=ctx, timeout=20,
+                                    source_address=(src, 0) if src else None)
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
     headers = dict(headers or {})
     if data is not None:

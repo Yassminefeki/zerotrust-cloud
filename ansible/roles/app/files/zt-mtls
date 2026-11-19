@@ -16,6 +16,10 @@ Then the request itself must match one of the listener's `routes` (generated fro
   * no route with that method + path -> 404; a route that is not open to this caller -> 403.
   * a listener without routes serves nothing (default deny).
 
+Then, per identity (the actor directory of mtls.json):
+  * `sources`: the identity is valid only from these addresses (a certificate bound to a device);
+  * `rate_per_min`: token bucket per identity; beyond it 429 + Retry-After, logged once per burst.
+
 Routes implemented here: GET /health, GET /chain?marker=X (this hop + the next hops, down to the
 database), GET /api/me (who the caller is: actor, role, customer). Others answer 501 until their
 stage is deployed.
@@ -29,6 +33,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -60,6 +65,29 @@ SECURITY_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
 }
+
+
+class RateLimiter:
+    """Token bucket per identity: `per_min` tokens, refilled continuously (burst = per_min)."""
+
+    def __init__(self):
+        self.buckets, self.lock = {}, threading.Lock()
+
+    def take(self, ident, per_min):
+        """-> 0 if allowed, else the seconds to wait before the next request."""
+        now = time.monotonic()
+        with self.lock:
+            tokens, last = self.buckets.get(ident, (float(per_min), now))
+            tokens = min(float(per_min), tokens + (now - last) * per_min / 60.0)
+            if tokens >= 1:
+                self.buckets[ident] = (tokens - 1, now)
+                return 0
+            self.buckets[ident] = (tokens, now)
+            return max(1, int((1 - tokens) * 60.0 / per_min + 0.999))
+
+
+LIMITER = RateLimiter()
+THROTTLED = set()          # identities currently refused (log the start of a burst only)
 
 
 def spiffe_ids(peercert):
@@ -195,6 +223,7 @@ class Request:
         # what a browser says about where a request comes from (cross-site request forgery checks)
         self.browser = {k: handler.headers.get(k, "") for k in ("Content-Type", "Origin", "Host", "Sec-Fetch-Site")}
         self.raw = raw
+        self.listener = handler.listener
         self.peer_id, self.actor, self.route = handler.peer_id, handler.actor, handler.route["name"]
 
     def json(self):
@@ -248,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("%s %s %s", self.client_address[0], self.peer_id, fmt % args)
 
-    def _send(self, code, obj):
+    def _send(self, code, obj, headers=None):
         if isinstance(obj, tuple) and obj and obj[0] == "raw":
             _, ctype, body = obj
             cache = "no-cache"
@@ -259,6 +288,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
         for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
+        for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.send_header("Connection", "close")
         self.end_headers()
@@ -284,7 +315,18 @@ class Handler(BaseHTTPRequestHandler):
             reason = f"source {src} not allowed"
         elif self.peer_id not in self.listener["allowed_ids"]:
             reason = f"identity {ids} not allowed"
+        elif "sources" in self.actor and not any(src in ipaddress.ip_network(n) for n in self.actor["sources"]):
+            # a stolen certificate is useless away from the device it was issued for
+            reason = f"identity {self.peer_id} not allowed from {src} (bound to {', '.join(self.actor['sources'])})"
+        elif self.actor.get("rate_per_min") and (wait := LIMITER.take(self.peer_id, self.actor["rate_per_min"])):
+            if self.peer_id not in THROTTLED:
+                THROTTLED.add(self.peer_id)
+                log.info("rate-limited %s: above %s requests/min, retry after %ss",
+                         self.peer_id, self.actor["rate_per_min"], wait)
+            self._send(429, {"error": "too many requests", "retry_after": wait}, {"Retry-After": str(wait)})
+            return False
         else:
+            THROTTLED.discard(self.peer_id)
             route = find_route(self.listener, method, path)
             if route is None:
                 code, reason = 404, f"no route {method} {path}"
@@ -344,6 +386,7 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 128     # listen backlog (socketserver's default of 5 drops bursts of clients)
 
     def __init__(self, listener):
         host, port = listener["listen"].rsplit(":", 1)

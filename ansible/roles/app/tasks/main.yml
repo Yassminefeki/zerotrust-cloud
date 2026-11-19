@@ -36,6 +36,15 @@
     mode: "0755"
   notify: Restart zt-mtls
 
+- name: Partner secrets directory (frontend only)
+  ansible.builtin.file:
+    path: /etc/zt/partners
+    state: directory
+    owner: root
+    group: zt-app
+    mode: "0750"
+  when: zt_mtls.serves.values() | selectattr('partners', 'defined') | list | length > 0
+
 - name: ZT Bank application module
   ansible.builtin.file:
     path: /usr/local/lib/zt
@@ -58,6 +67,19 @@
     mode: "0644"
     directory_mode: "0755"
   when: zt_mtls.serves.values() | selectattr('app', 'defined') | selectattr('app', 'equalto', 'web') | list | length > 0
+
+- name: Partner webhook secrets (only where the partner API is served; readable by the service only)
+  ansible.builtin.copy:
+    src: "{{ zt_secrets }}/partners/{{ item.value.partner }}.key"
+    dest: "{{ item.value.key_file }}"
+    owner: root
+    group: zt-app
+    mode: "0640"
+  loop: "{{ zt_mtls.serves.values() | selectattr('partners', 'defined') | map(attribute='partners')
+            | map('dict2items') | flatten }}"
+  loop_control: {label: "{{ item.value.key_file }}"}
+  no_log: true
+  notify: Restart zt-mtls
 
 - name: mTLS config generated from policy.yaml
   ansible.builtin.copy:

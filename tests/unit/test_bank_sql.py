@@ -334,3 +334,85 @@ def test_statement_month_validated(db, month):
     with pytest.raises(psycopg2.Error) as e:
         as_customer(db, None, "SELECT * FROM bank.statements(%s)", (month,))
     assert sqlstate(e) == "ZT400"
+
+
+# ------------------------------------------------------- bank.incoming_payment (stage 12) --
+PAYFLOW = "spiffe://cloud.local/partner/payflow"
+
+
+def incoming(db, nonce=None, ref=None, to="ZTB-ALICE-01", cents=100, signed_at=None, actor=PAYFLOW,
+             partner="payflow", desc="order"):
+    return as_customer(db, None, "SELECT * FROM bank.incoming_payment(%s,%s,%s,%s,%s,%s,%s,%s)",
+                       (partner, actor, nonce or uuid.uuid4().hex, int(time.time()) if signed_at is None else signed_at,
+                        ref or f"PF-{key()}", to, cents, desc))[0]
+
+
+def test_incoming_payment_double_entry_from_the_partner_account(db):
+    a, p = balance(db, "ZTB-ALICE-01"), balance(db, "ZTB-PAYFLOW-00")
+    pid, replayed = incoming(db, cents=777)
+    assert replayed is False
+    assert balance(db, "ZTB-ALICE-01") == a + 777 and balance(db, "ZTB-PAYFLOW-00") == p - 777
+    assert as_customer(db, None, "SELECT bank.status()")[0][0]["ledger_balanced"] is True
+
+
+def test_incoming_nonce_accepted_once(db):
+    n = uuid.uuid4().hex
+    incoming(db, nonce=n)
+    before = balance(db, "ZTB-ALICE-01")
+    with pytest.raises(psycopg2.Error) as e:
+        incoming(db, nonce=n)                    # even with another reference: the request was seen
+    assert sqlstate(e) == "ZT409" and "nonce already used" in str(e.value)
+    assert balance(db, "ZTB-ALICE-01") == before
+
+
+def test_incoming_reference_pays_once(db):
+    ref = f"PF-{key()}"
+    pid, _ = incoming(db, ref=ref, cents=300)
+    before = balance(db, "ZTB-ALICE-01")
+    assert incoming(db, ref=ref, cents=300) == (pid, True)
+    with pytest.raises(psycopg2.Error) as e:
+        incoming(db, ref=ref, cents=301)
+    assert sqlstate(e) == "ZT409"
+    assert balance(db, "ZTB-ALICE-01") == before
+
+
+@pytest.mark.parametrize("kw,code", [
+    ({"signed_at": int(time.time()) - 3600}, "ZT401"),          # stale: the database checks the window too
+    ({"signed_at": int(time.time()) + 3600}, "ZT401"),
+    ({"actor": "spiffe://cloud.local/customer/alice"}, "ZT403"),  # identity must be the partner's
+    ({"partner": "nobody"}, "ZT403"),
+    ({"to": "ZTB-BANK-00"}, "ZT404"),
+    ({"to": "ZTB-NOBODY-01"}, "ZT404"),
+    ({"cents": 0}, "ZT400"),
+    ({"cents": 500001}, "ZT422"),
+    ({"nonce": "short"}, "ZT400"),
+    ({"ref": "x"}, "ZT400"),
+])
+def test_incoming_rules(db, kw, code):
+    with pytest.raises(psycopg2.Error) as e:
+        incoming(db, **kw)
+    assert sqlstate(e) == code
+
+
+def test_incoming_audited_and_append_only(db):
+    pid, _ = incoming(db, cents=55)
+    conn = psycopg2.connect(f"{db['server']} dbname={db['name']}")
+    try:
+        with conn, conn.cursor() as c:
+            c.execute("SELECT actor, detail->>'partner' FROM bank.audit WHERE action = 'incoming_payment' "
+                      "AND detail->>'transfer' = %s", (str(pid),))
+            assert c.fetchone() == (PAYFLOW, "payflow")
+        with pytest.raises(psycopg2.Error) as e:
+            with conn, conn.cursor() as c:
+                c.execute("DELETE FROM bank.incoming")
+        assert e.value.pgcode == "ZT405"
+    finally:
+        conn.close()
+
+
+def test_application_role_cannot_touch_the_partner_tables(db):
+    for stmt in ("SELECT * FROM bank.partner_nonces", "DELETE FROM bank.partner_nonces",
+                 "SELECT * FROM bank.partners", "INSERT INTO bank.incoming VALUES ('payflow','x',gen_random_uuid(),'a',1)"):
+        with pytest.raises(psycopg2.Error) as e:
+            as_customer(db, "alice", stmt)
+        assert e.value.pgcode == "42501", stmt
