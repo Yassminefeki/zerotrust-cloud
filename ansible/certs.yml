@@ -89,12 +89,25 @@
       loop: "{{ zt_wg.peers | rejectattr('test') | list | product(['client.crt', 'client.key', 'root_ca.crt']) | list }}"
       loop_control: {label: "{{ item.0.name }}/{{ item.1 }}"}
 
+    - name: One private folder per exported actor (build/export/<peer>/<actor>/)
+      ansible.builtin.file:
+        path: "{{ wg_export }}/{{ item.peer }}/{{ item.actor }}"
+        state: directory
+        mode: "0700"
+      loop: "{{ export_files | selectattr('name', 'equalto', 'client.crt') | list }}"
+      loop_control: {label: "{{ item.peer }}/{{ item.actor }}"}
+      vars:
+        export_files: >-
+          {%- set out = [] -%}
+          {%- for cn, i in zt_pki.identities.items() if i.kind == 'client' and i.export_to is defined -%}
+          {%- set _ = out.append({'peer': i.export_to, 'actor': i.actor, 'name': 'client.crt'}) -%}
+          {%- endfor -%}{{ out }}
+
     - name: Export each actor's identity to its machine (build/export/<peer>/<actor>/)
       ansible.builtin.copy:
         src: "{{ item.src }}"
         dest: "{{ wg_export }}/{{ item.peer }}/{{ item.actor }}/{{ item.name }}"
         mode: "0600"
-        directory_mode: "0700"
       loop: "{{ export_files }}"
       loop_control: {label: "{{ item.peer }}/{{ item.actor }}/{{ item.name }}"}
       vars:
