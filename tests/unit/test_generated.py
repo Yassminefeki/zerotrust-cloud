@@ -157,6 +157,50 @@ def test_wireguard_configs(build, env):
         assert not re.search(r"PrivateKey = [A-Za-z0-9+/]{43}=", text), "no real key in templates"
 
 
+def test_test_peer_is_hostile_and_direct(build, env):
+    """The test peer routes every policy network into the tunnel (the gateway must refuse what
+    it may not reach) and talks to the gateway on the NAT network: nothing Wi-Fi related."""
+    cli = (build / "wireguard/client-test-peer.conf.j2").read_text()
+    assert "Endpoint = 192.168.122.10:51820" in cli
+    allowed = re.search(r"^AllowedIPs = (.*)$", cli, re.M).group(1).split(", ")
+    assert set(allowed) == {"10.10.0.0/24", "10.20.0.0/24", "10.30.0.0/24", "10.40.0.0/24",
+                            "10.50.0.0/24", "192.168.122.0/24"}
+    assert env["entry_point"] not in cli
+
+
+def test_inventory_wireguard_group(build):
+    inv = yaml.safe_load((build / "inventory.yml").read_text())
+    assert inv["all"]["children"]["wireguard"]["hosts"] == {"gateway": {}}
+
+
+def test_wireguard_json(build):
+    wg = json.loads((build / "wireguard/wireguard.json").read_text())
+    assert wg["server"] == "gateway" and wg["iface"] == "wg0" and wg["port"] == 51820
+    assert wg["address"] == "10.10.0.1/24" and wg["endpoint_ip"] == "192.168.122.10"
+    assert [(p["name"], p["test"]) for p in wg["peers"]] == [("i7", False), ("test-peer", True)]
+    assert wg["reachable"] == ["10.20.0.10/32"]
+
+
+def test_test_peer_template_independent_of_env(policy, env, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    gen_rules.generate(policy, env, a)
+    gen_rules.generate(policy, dict(env, wan_interface="enp3s0", wan_port=443,
+                                    entry_point="other-host.local"), b)
+    for f in ("client-test-peer.conf.j2", "gateway-wg0.conf.j2"):
+        assert (a / "wireguard" / f).read_text() == (b / "wireguard" / f).read_text()
+
+
+@pytest.mark.parametrize("peers,msg", [
+    ([{"name": "only-test", "ip": "10.10.0.9", "test": True}], "at least one real"),
+    ([{"name": "i7", "ip": "10.10.0.2", "test": "yes"}], "test must be true/false"),
+    ([{"name": "Bad_Name", "ip": "10.10.0.2"}], "lowercase DNS label"),
+])
+def test_bad_wireguard_peers_rejected(policy, peers, msg):
+    p = json.loads(json.dumps(policy))
+    p["wireguard"]["peers"] = peers
+    assert any(msg in e for e in gen_rules.validate_policy(p))
+
+
 # ------------------------------------------------------------- terraform --
 def test_tfvars(build):
     tf = json.loads((build / "terraform.tfvars.json").read_text())

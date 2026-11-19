@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# zt-test-peer up|down|status CONF — the hostile WireGuard test client on the i5 (run as root).
+#
+# Network namespace "zt-peer" whose ONLY interface is the tunnel:
+#   * the WireGuard interface is created in the host namespace and then MOVED into zt-peer.
+#     Its encrypted UDP socket stays in the host namespace (that is how WireGuard works), so the
+#     ciphertext leaves via virbr-zt-wan, while everything run inside zt-peer can only use wg.
+#   * every AllowedIPs network of CONF is routed into the tunnel, so whatever the gateway may not
+#     forward must be refused BY THE GATEWAY (cryptokey routing + nftables), not by local routes.
+set -euo pipefail
+NS=zt-peer
+DEV=wg-zt-peer
+cmd=${1:-}
+conf=${2:-}
+
+die() { echo "zt-test-peer: $*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
+
+down() {
+  ip netns del "$NS" 2>/dev/null || true      # deleting the namespace deletes the interface
+  ip link del "$DEV" 2>/dev/null || true      # in case an earlier 'up' failed half-way
+}
+
+case "$cmd" in
+  up)
+    [ -r "$conf" ] || die "usage: $0 up build/export/test-peer/wg0.conf (run 'make wireguard')"
+    addr=$(sed -n 's/^Address *= *//p' "$conf")
+    routes=$(sed -n 's/^AllowedIPs *= *//p' "$conf" | tr -d ' ' | tr ',' ' ')
+    [ -n "$addr" ] && [ -n "$routes" ] || die "$conf has no Address/AllowedIPs"
+    down
+    ip netns add "$NS"
+    ip link add "$DEV" type wireguard
+    wg setconf "$DEV" <(wg-quick strip "$conf")
+    ip link set "$DEV" netns "$NS"
+    ip -n "$NS" link set lo up
+    ip -n "$NS" addr add "$addr" dev "$DEV"
+    ip -n "$NS" link set "$DEV" up
+    for r in $routes; do ip -n "$NS" route add "$r" dev "$DEV"; done
+    echo "zt-test-peer: up ($addr in netns $NS)"
+    ;;
+  down)
+    down
+    echo "zt-test-peer: down"
+    ;;
+  status)
+    ip netns exec "$NS" wg show "$DEV"
+    ip -n "$NS" -br addr
+    ip -n "$NS" route
+    ;;
+  *)
+    die "usage: $0 up CONF | down | status"
+    ;;
+esac

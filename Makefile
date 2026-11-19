@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait recreate-vms test-2 ca test-3 firewall test-4 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -87,11 +87,26 @@ firewall: gen  ## stage 4: default-drop nftables on every VM (auto-rollback if S
 test-4: venv gen  ## stage 4: live rulesets = generated, NxN TCP probes, drop logging
 	$(PYTEST) tests/firewall -v
 
-# ------------------------------------------------- full pipeline (filled in by later stages) --
-up: host infra ca firewall  ## build everything (stages 1-7)
-	@echo ">> stages 5-7 not implemented yet."
+# ---------------------------------------------------------------- stage 5 --
+wireguard: gen  ## stage 5: keys (on the i5, never committed), wg0 on the gateway, client exports
+	$(ANSIBLE) ansible-playbook wireguard.yml
+	@echo ">> i7 client config: $(BUILD)/export/i7/wg0.conf (copy it to the i7 as /etc/wireguard/wg0.conf)"
 
-test: test-0 test-1 test-2 test-3 test-4  ## run every test
+test-peer: venv  ## (re)start the tunnel test client: netns zt-peer on the i5 (sudo)
+	sudo tools/zt-test-peer up $(BUILD)/export/test-peer/wg0.conf
+
+test-peer-down:  ## remove the tunnel test client
+	sudo tools/zt-test-peer down
+
+test-5: venv gen  ## stage 5: keys, gateway wg0, handshake, tunnel -> frontend only, impersonation
+	sudo -v
+	$(PYTEST) tests/wireguard -v
+
+# ------------------------------------------------- full pipeline (filled in by later stages) --
+up: host infra ca firewall wireguard  ## build everything (stages 1-7)
+	@echo ">> stages 6-7 not implemented yet."
+
+test: test-0 test-1 test-2 test-3 test-4 test-5  ## run every test
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
 	$(TF) destroy -input=false -auto-approve $(TFVARS)

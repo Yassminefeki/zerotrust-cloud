@@ -15,3 +15,9 @@ zt_env: "{{ lookup('ansible.builtin.file', zt_repo ~ '/env.yaml') | from_yaml }}
 # step-ca layout on the CA VM
 step_path: /etc/step-ca
 step_user: step
+
+# WireGuard: layout generated from policy.yaml; keys in zt_secrets/wireguard (never in build/ or git)
+zt_wg: "{{ lookup('ansible.builtin.file', zt_build ~ '/wireguard/wireguard.json') | from_json }}"
+wg_secrets: "{{ zt_secrets }}/wireguard"
+# Exported client configs (contain a private key): build/export/<peer>/wg0.conf, mode 0600
+wg_export: "{{ zt_build }}/export"

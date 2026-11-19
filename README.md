@@ -52,6 +52,8 @@ make ca                        # stage 3: step-ca on the CA VM
 make test-3                    # stage 3: CA tests (issuance + refusals)
 make firewall                  # stage 4: nftables default-drop on every VM
 make test-4                    # stage 4: live rulesets + NxN TCP probes
+make wireguard                 # stage 5: WireGuard keys + wg0 on the gateway + client exports
+make test-5                    # stage 5: handshake, tunnel -> frontend only, impersonation
 ```
 
 ## Host preparation (stage 1) — what `make host` changes on the i5
@@ -126,3 +128,41 @@ Anti lock-out, three layers:
 Tests probe real TCP connections for every source x destination x port of
 `build/matrix.json`: allowed = handshake or RST (nothing listening yet), denied = timeout
 or no route. The i5 has SSH only: it cannot reach the CA, and that is tested too.
+
+## WireGuard (stage 5)
+
+`make wireguard`:
+- generates on the i5, once, a key pair per node/peer and a pre-shared key per peer in
+  `ansible/.secrets/wireguard/` (0600, gitignored, never overwritten);
+- fills `build/wireguard/gateway-wg0.conf.j2` (generated from the policy, keys as Jinja
+  placeholders) into `/etc/wireguard/wg0.conf` on the gateway (0600), `wg-quick@wg0` at boot;
+- writes one client config per peer to `build/export/<peer>/wg0.conf` (0600).
+
+**The i7 side is not managed here.** The only thing produced for it is
+`build/export/i7/wg0.conf`: `Endpoint = <entry_point>:<wan_port>` (the mDNS name, never an
+IP), `AllowedIPs = 10.20.0.10/32` (only what the policy lets the tunnel reach). Copy it to the
+i7 over a trusted channel (USB stick, `scp`), as `/etc/wireguard/wg0.conf`, then delete the copy.
+
+Path of a packet from the i7: Wi-Fi → i5 `wan_interface` → DNAT (matched by interface name) →
+`192.168.122.10:51820` → gateway `wg0` → nftables forward allows **only** `frontend:8443` →
+frontend, which sees the real tunnel address (no NAT on the gateway).
+
+**Test peer.** `tools/zt-test-peer` builds a network namespace `zt-peer` on the i5 whose only
+interface is a tunnel to the gateway (10.10.0.200). Unlike the i7 it routes *every* policy
+network into the tunnel, so each refusal is proven by the gateway, not by the client's routes.
+It talks to the gateway directly on the NAT network: a machine cannot send its own traffic in
+through its own Wi-Fi card, so the DNAT itself is checked from the i7 (below).
+
+Tests also try to impersonate: the i7's tunnel address from the test peer's key (dropped:
+each key owns its /32), an unknown key, and the test peer's private key without its PSK
+(no handshake, no answer).
+
+### Check from the i7 (manual, once)
+
+```bash
+sudo wg-quick up wg0
+sudo wg show wg0 latest-handshakes        # a recent timestamp
+nc -vz -w 3 10.20.0.10 8443               # succeeded / refused = reachable (service comes in stage 7)
+```
+On the i5, `ssh -F build/ssh_config gateway sudo wg show wg0 endpoints` lists the i7's own LAN
+address for its key: the packets came in through the DNAT, unmasqueraded.

@@ -63,3 +63,21 @@ def probe_from(host, targets, timeout=TIMEOUT):
     cmd = f"python3 -c {shlex.quote(REMOTE)} {shlex.quote(json.dumps(targets))} {timeout}"
     out = host.check_output(cmd)
     return json.loads(out)
+
+
+def probe_netns(ns, targets, timeout=TIMEOUT, bind=None):
+    """Run the probe inside a network namespace on the i5 (needs `sudo -v` first).
+    bind: source address to use (to try spoofing another tunnel client's address)."""
+    if not targets:
+        return []
+    code = REMOTE
+    if bind:
+        code = code.replace("s=socket.socket(); s.settimeout(T)",
+                            f"s=socket.socket(); s.settimeout(T); s.bind(({bind!r},0))")
+        assert bind in code, "probe template changed"
+    cmd = ["sudo", "-n", "ip", "netns", "exec", ns, "python3", "-c", code,
+           json.dumps(targets), str(timeout)]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise AssertionError(f"probe in netns {ns} failed: {r.stderr}")
+    return json.loads(r.stdout)

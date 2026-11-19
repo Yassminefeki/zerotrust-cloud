@@ -1,0 +1,78 @@
+# Stage 5 — WireGuard on the gateway. `make wireguard`
+#   1. on the i5: generate keys once (ansible/.secrets/wireguard, 0600, gitignored) and render
+#      the client configs to build/export/<peer>/wg0.conf (0600). The i7 one is the file to
+#      copy to the client; this repo never touches the i7.
+#   2. on the gateway: wg0 from the generated template, started at boot.
+- name: WireGuard keys and client configs on the CLOUD host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    wg_names: "{{ [zt_wg.server] + (zt_wg.peers | map(attribute='name') | list) }}"
+    wg_peer_names: "{{ zt_wg.peers | map(attribute='name') | list }}"
+  tasks:
+    - name: wg is installed on the i5 (stage 1)
+      ansible.builtin.command: wg --version
+      changed_when: false
+
+    - name: Private directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: ["{{ zt_secrets }}", "{{ wg_secrets }}", "{{ wg_export }}"]
+
+    - name: Private key per node/peer (created once, never overwritten)
+      ansible.builtin.shell: umask 077 && wg genkey > {{ (wg_secrets ~ '/' ~ item ~ '.key') | quote }}
+      args:
+        creates: "{{ wg_secrets }}/{{ item }}.key"
+      loop: "{{ wg_names }}"
+
+    - name: Public key derived from the private key
+      ansible.builtin.shell: >-
+        umask 077 && wg pubkey < {{ (wg_secrets ~ '/' ~ item ~ '.key') | quote }}
+        > {{ (wg_secrets ~ '/' ~ item ~ '.pub') | quote }}
+      args:
+        creates: "{{ wg_secrets }}/{{ item }}.pub"
+      loop: "{{ wg_names }}"
+
+    - name: Pre-shared key per peer (extra symmetric layer, post-quantum hedge)
+      ansible.builtin.shell: umask 077 && wg genpsk > {{ (wg_secrets ~ '/' ~ item ~ '.psk') | quote }}
+      args:
+        creates: "{{ wg_secrets }}/{{ item }}.psk"
+      loop: "{{ wg_peer_names }}"
+
+    - name: Key files are private
+      ansible.builtin.file:
+        path: "{{ wg_secrets }}/{{ item }}"
+        mode: "0600"
+      loop: "{{ (wg_names | product(['.key', '.pub']) | map('join') | list)
+                + (wg_peer_names | product(['.psk']) | map('join') | list) }}"
+
+    - name: Load keys
+      ansible.builtin.include_tasks: tasks/wg_keys.yml
+
+    - name: Export directory per peer
+      ansible.builtin.file:
+        path: "{{ wg_export }}/{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: "{{ wg_peer_names }}"
+
+    - name: Client config per peer (i7 = the file to export; test-peer = used by tests)
+      ansible.builtin.template:
+        src: "{{ zt_build }}/wireguard/client-{{ item }}.conf.j2"
+        dest: "{{ wg_export }}/{{ item }}/wg0.conf"
+        mode: "0600"
+      loop: "{{ wg_peer_names }}"
+      no_log: true
+
+- name: WireGuard server on the gateway
+  hosts: wireguard   # inventory group generated from policy.yaml (nodes with a tunnel interface)
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Load keys
+      ansible.builtin.include_tasks: tasks/wg_keys.yml
+  roles:
+    - wireguard

@@ -107,4 +107,7 @@ infra:
 wireguard:
   peers:
     - {name: i7,        ip: 10.10.0.2}     # exported template, i7 side not managed here
-    - {name: test-peer, ip: 10.10.0.200}   # netns on the i5, used by tests/
+    # test: true = a HOSTILE probe client for tests/ (netns on the i5). It routes EVERY policy
+    # network into the tunnel, so blocking is proven by the gateway, not by its own routes, and it
+    # reaches the gateway on the NAT network (a host cannot DNAT its own Wi-Fi traffic).
+    - {name: test-peer, ip: 10.10.0.200, test: true}

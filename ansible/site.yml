@@ -7,3 +7,6 @@
 
 - name: Stage 4 - nftables default-drop on every VM
   ansible.builtin.import_playbook: firewall.yml
+
+- name: Stage 5 - WireGuard on the gateway
+  ansible.builtin.import_playbook: wireguard.yml

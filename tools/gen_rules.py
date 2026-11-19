@@ -194,7 +194,14 @@ def validate_policy(policy: dict) -> list[str]:
             errs.append(f"wireguard peer {peer['name']}: {ip} not in tunnel network")
         if peer["ip"] in peer_ips or peer["ip"] in seen_ips:
             errs.append(f"wireguard peer {peer['name']}: duplicate IP {ip}")
+        if not isinstance(peer.get("test", False), bool):
+            errs.append(f"wireguard peer {peer['name']}: test must be true/false")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", str(peer["name"])):
+            errs.append(f"wireguard peer {peer['name']}: name must be a lowercase DNS label")
         peer_ips.add(peer["ip"])
+    peers = policy.get("wireguard", {}).get("peers", [])
+    if peers and not any(not p.get("test") for p in peers):
+        errs.append("wireguard: at least one real (non-test) peer is required")
     return errs
 
 
@@ -484,34 +491,55 @@ def render_pg_ident(policy: dict, rules: list[Rule]) -> str:
 
 
 def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
+    """Server config, one client template per peer, and wireguard.json for Ansible/tests.
+    Keys are NEVER here: the templates carry Jinja placeholders that Ansible fills from
+    ansible/.secrets/wireguard (generated on the i5, mode 0600, gitignored)."""
     nets = policy["networks"]
     gw = next(n for n, s in policy["nodes"].items() if "tunnel" in s["interfaces"])
-    gw_tun = policy["nodes"][gw]["interfaces"]["tunnel"]
+    gw_ifs = policy["nodes"][gw]["interfaces"]
+    gw_tun = gw_ifs["tunnel"]
     prefix = ipaddress.ip_network(nets["tunnel"]["cidr"]).prefixlen
     wg_svc = next(s for s in policy["services"].values() if s["node"] == gw and s["proto"] == "udp")
-    # Clients only route what the policy lets them reach through the tunnel.
+    port = int(wg_svc["port"])
+    # Real clients only route what the policy lets them reach through the tunnel.
     reachable = sorted({f"{r.dst.addr}/32" for r in resolve(policy) if r.src.name == "tunnel"})
+    # Test clients route EVERY policy network into the tunnel: what they cannot reach must be
+    # refused by the gateway, not by their own routing table.
+    everything = sorted(s["cidr"] for s in nets.values())
+    peers = policy["wireguard"]["peers"]
     out = {}
     srv = [GENERATED_HEADER.rstrip(), "[Interface]",
-           f"Address = {gw_tun}/{prefix}", f"ListenPort = {wg_svc['port']}",
+           f"Address = {gw_tun}/{prefix}", f"ListenPort = {port}",
            "PrivateKey = {{ wg_keys['" + gw + "'].private }}", ""]
-    for peer in policy["wireguard"]["peers"]:
-        srv += [f"# peer: {peer['name']}", "[Peer]",
+    for peer in peers:
+        srv += [f"# peer: {peer['name']}" + (" (test)" if peer.get("test") else ""), "[Peer]",
                 "PublicKey = {{ wg_keys['" + peer["name"] + "'].public }}",
                 "PresharedKey = {{ wg_keys['" + peer["name"] + "'].psk }}",
                 f"AllowedIPs = {peer['ip']}/32", ""]
     out[f"{gw}-wg0.conf.j2"] = "\n".join(srv)
-    for peer in policy["wireguard"]["peers"]:
+    for peer in peers:
+        if peer.get("test"):
+            endpoint = f"{gw_ifs[wg_svc['network']]}:{port}"   # direct, on the libvirt NAT network
+            allowed = everything
+        else:
+            endpoint = f"{env['entry_point']}:{int(env['wan_port'])}"   # DNAT on the i5's WAN NIC
+            allowed = reachable
         cli = [GENERATED_HEADER.rstrip(), f"# client: {peer['name']}", "[Interface]",
                f"Address = {peer['ip']}/32",
                "PrivateKey = {{ wg_keys['" + peer["name"] + "'].private }}", "",
                "[Peer]",
                "PublicKey = {{ wg_keys['" + gw + "'].public }}",
                "PresharedKey = {{ wg_keys['" + peer["name"] + "'].psk }}",
-               f"Endpoint = {env['entry_point']}:{int(env['wan_port'])}",
-               f"AllowedIPs = {', '.join(reachable)}",
+               f"Endpoint = {endpoint}",
+               f"AllowedIPs = {', '.join(allowed)}",
                "PersistentKeepalive = 25", ""]
         out[f"client-{peer['name']}.conf.j2"] = "\n".join(cli)
+    out["wireguard.json"] = json.dumps({
+        "server": gw, "iface": nets["tunnel"].get("iface", "wg0"), "address": f"{gw_tun}/{prefix}",
+        "port": port, "endpoint_ip": gw_ifs[wg_svc["network"]],
+        "peers": [{"name": p["name"], "ip": p["ip"], "test": bool(p.get("test", False))} for p in peers],
+        "reachable": reachable,
+    }, indent=2) + "\n"
     return out
 
 
@@ -604,10 +632,13 @@ def render_tfvars(policy: dict, env: dict) -> dict:
 def render_inventory(policy: dict, env: dict) -> dict:
     hosts = {n: {"ansible_host": s["interfaces"]["mgmt"], "zt_id": s["id"]}
              for n, s in policy["nodes"].items()}
+    # Role groups derived from the policy, so playbooks never name a VM.
+    wg = {n: {} for n, s in policy["nodes"].items() if "tunnel" in s["interfaces"]}
     return {"all": {"vars": {"ansible_user": env["ssh_user"],
                              "ansible_ssh_private_key_file": private_key_file(env),
                              "ansible_python_interpreter": "/usr/bin/python3"},
-                    "hosts": hosts}}
+                    "hosts": hosts,
+                    "children": {"wireguard": {"hosts": wg}}}}
 
 
 def private_key_file(env: dict) -> str:

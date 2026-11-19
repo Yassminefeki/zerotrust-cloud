@@ -1,0 +1,12 @@
+# Load the WireGuard keys generated on the i5 into `wg_keys` (lookups always run on the i5).
+# wg_keys[name] = {private, public, psk}; psk is per peer (empty for the server).
+- name: Load WireGuard keys (secret, not logged)
+  ansible.builtin.set_fact:
+    wg_keys: >-
+      {{ wg_keys | default({}) | combine({item: {
+           'private': lookup('ansible.builtin.file', wg_secrets ~ '/' ~ item ~ '.key'),
+           'public':  lookup('ansible.builtin.file', wg_secrets ~ '/' ~ item ~ '.pub'),
+           'psk':     (lookup('ansible.builtin.file', wg_secrets ~ '/' ~ item ~ '.psk')
+                       if item != zt_wg.server else '')}}) }}
+  loop: "{{ [zt_wg.server] + (zt_wg.peers | map(attribute='name') | list) }}"
+  no_log: true
