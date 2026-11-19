@@ -1,10 +1,12 @@
 # Stage 6 — workload and client certificates. `make certs`
 #   * every node with an mTLS identity (inventory group "pki"): key generated on the VM,
 #     24h certificate from step-ca via a one-time token, hourly renewal timer;
-#   * tunnel clients (i7, test-peer): key generated on the i5 (ansible/.secrets/pki, 0600),
-#     CSR signed by the CA. The i7 copy goes to build/export/i7/ next to its wg0.conf.
-- name: Artifacts and secrets
-  ansible.builtin.import_playbook: artifacts.yml
+#   * actors (alice, bob, dev, statements...): key generated on the i5 (ansible/.secrets/pki, 0600),
+#     CSR signed by the CA with the actor's lifetime; exported to build/export/<peer>/<actor>/.
+# The CA first: its issuance policy (which names it may sign) is generated from policy.yaml, so a
+# new actor must reach the CA before its certificate is requested. No-op when nothing changed.
+- name: CA up to date with the policy (and the artifacts/secrets it needs)
+  ansible.builtin.import_playbook: ca.yml
 
 - name: Workload certificates
   hosts: pki
