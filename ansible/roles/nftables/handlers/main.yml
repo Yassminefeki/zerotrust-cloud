@@ -1,0 +1,4 @@
+---
+- name: Load ruleset with rollback
+  ansible.builtin.command: /usr/local/sbin/zt-nft-apply
+  changed_when: true

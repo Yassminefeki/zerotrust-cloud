@@ -3,9 +3,7 @@
 Expected values come from build/pki/pki.json (generated from policy.yaml)."""
 import hashlib
 import json
-import ssl
 import subprocess
-import urllib.request
 from datetime import datetime
 
 import pytest
@@ -99,16 +97,17 @@ def test_root_exported_and_fingerprint_matches(ca):
     assert on_ca == fp_file.read_text().strip()
 
 
-def test_health_over_tls13_with_pinned_root(pki):
-    ctx = ssl.create_default_context(cafile=str(BUILD / "pki" / "root_ca.crt"))
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
-    with urllib.request.urlopen(f"{pki['ca']['url']}/health", context=ctx, timeout=10) as r:
-        assert json.loads(r.read()) == {"status": "ok"}
+def test_health_over_tls13_with_pinned_root(ca, pki):
+    """Run on the CA VM: after stage 4 the i5 may only SSH to the VMs (policy: admin-ssh),
+    so it cannot reach :9000 itself. The root used here is the one pinned on the i5."""
+    url = f"{pki['ca']['url']}/health"
+    r = ca.run(f"curl -s --tlsv1.3 --tls-max 1.3 --cacert /etc/step-ca/certs/root_ca.crt {url}")
+    assert r.rc == 0 and json.loads(r.stdout) == {"status": "ok"}, r.stderr
 
 
-def test_tls12_refused(pki):
-    r = run(f"openssl s_client -connect {pki['ca']['ip']}:{pki['ca']['port']} -tls1_2 </dev/null", timeout=15)
-    assert r.returncode != 0 or "Cipher is (NONE)" in r.stdout
+def test_tls12_refused(ca, pki):
+    r = ca.run(f"openssl s_client -connect {pki['ca']['ip']}:{pki['ca']['port']} -tls1_2 </dev/null")
+    assert r.rc != 0 or "Cipher is (NONE)" in r.stdout
 
 
 def test_secrets_never_tracked_by_git():

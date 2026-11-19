@@ -4,3 +4,6 @@
 # as they are implemented.
 - name: Stage 3 - internal CA
   ansible.builtin.import_playbook: ca.yml
+
+- name: Stage 4 - nftables default-drop on every VM
+  ansible.builtin.import_playbook: firewall.yml

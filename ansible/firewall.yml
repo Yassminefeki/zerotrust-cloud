@@ -1,0 +1,7 @@
+# Stage 4 — default-drop nftables on every VM (generated from policy.yaml). `make firewall`
+- name: Firewall on every VM (defense in depth)
+  hosts: all
+  become: true
+  gather_facts: false
+  roles:
+    - nftables

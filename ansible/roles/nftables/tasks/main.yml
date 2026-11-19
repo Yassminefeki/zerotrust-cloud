@@ -1,0 +1,45 @@
+---
+# Default-drop nftables on every VM, generated from policy.yaml (build/nodes/<vm>/nftables.conf).
+# Anti lock-out: the ruleset always keeps SSH from the i5 over mgmt (checked by unit tests), and
+# it is loaded with an automatic rollback that only a fresh SSH connection can disarm.
+
+- name: The generated ruleset is the only firewall (ufw off)
+  ansible.builtin.systemd_service:
+    name: ufw
+    state: stopped
+    enabled: false
+    masked: true
+  failed_when: false
+
+- name: Rollback-protected loader
+  ansible.builtin.copy:
+    src: zt-nft-apply
+    dest: /usr/local/sbin/zt-nft-apply
+    mode: "0755"
+
+- name: Install the generated ruleset (refused if it does not parse)
+  ansible.builtin.copy:
+    src: "{{ zt_build }}/nodes/{{ inventory_hostname }}/nftables.conf"
+    dest: /etc/nftables.conf
+    mode: "0644"
+    validate: nft -c -f %s
+  notify: Load ruleset with rollback
+
+- name: Load it now (rollback armed)
+  ansible.builtin.meta: flush_handlers
+
+- name: Drop the multiplexed SSH session so the next task proves a NEW connection works
+  ansible.builtin.meta: reset_connection
+
+- name: A fresh SSH connection over mgmt still works
+  ansible.builtin.wait_for_connection:
+    timeout: 60
+
+- name: Confirm (disarm the rollback timer)
+  ansible.builtin.command: /usr/local/sbin/zt-nft-apply --confirm
+  changed_when: false
+
+- name: Ruleset loaded at every boot
+  ansible.builtin.systemd_service:
+    name: nftables
+    enabled: true

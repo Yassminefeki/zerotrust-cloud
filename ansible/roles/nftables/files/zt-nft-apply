@@ -1,0 +1,27 @@
+#!/bin/bash
+# zt-nft-apply — load /etc/nftables.conf with an automatic rollback (anti lock-out).
+#
+#  1. refuse a ruleset that does not parse
+#  2. save the live ruleset and arm a transient systemd timer that restores it in N seconds
+#  3. load the new ruleset
+# The caller (Ansible) must then open a NEW SSH connection and run `zt-nft-apply --confirm`,
+# which disarms the timer. If the new rules cut SSH, nobody confirms and the VM rolls back
+# by itself.
+set -euo pipefail
+NEW=/etc/nftables.conf
+ROLLBACK=/etc/nftables.rollback
+UNIT=zt-nft-rollback
+DELAY="${ZT_ROLLBACK_SECONDS:-120}"
+
+if [[ "${1:-}" == "--confirm" ]]; then
+  systemctl stop "$UNIT.timer" "$UNIT.service" 2>/dev/null || true
+  logger -t zt-nft-apply "new ruleset confirmed, rollback disarmed"
+  exit 0
+fi
+
+nft -c -f "$NEW"
+{ echo "flush ruleset"; nft list ruleset; } > "$ROLLBACK"
+systemctl stop "$UNIT.timer" "$UNIT.service" 2>/dev/null || true
+systemd-run --quiet --unit="$UNIT" --on-active="$DELAY" /usr/sbin/nft -f "$ROLLBACK"
+nft -f "$NEW"
+logger -t zt-nft-apply "new ruleset loaded, rollback armed for ${DELAY}s"

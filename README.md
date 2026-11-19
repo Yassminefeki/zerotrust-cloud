@@ -50,6 +50,8 @@ ssh -F build/ssh_config frontend   # SSH to any VM over mgmt
 make destroy                   # remove VMs/networks (host prep stays)
 make ca                        # stage 3: step-ca on the CA VM
 make test-3                    # stage 3: CA tests (issuance + refusals)
+make firewall                  # stage 4: nftables default-drop on every VM
+make test-4                    # stage 4: live rulesets + NxN TCP probes
 ```
 
 ## Host preparation (stage 1) — what `make host` changes on the i5
@@ -102,3 +104,19 @@ listening **only** on its mgmt address (`10.50.0.10:9000`), **TLS 1.3 only**.
 
 Identities (SPIFFE ID → SANs) exist only for nodes that take part in an mTLS flow
 (frontend, service-a, service-b, database) and the tunnel clients (`client/i7`, `client/test-peer`).
+
+## Firewall on every VM (stage 4)
+
+Each VM loads `build/nodes/<vm>/nftables.conf` (generated from `policy.yaml`): one table
+`inet zt`, **policy drop** on input, forward and output, conntrack for replies, and a
+rate-limited `log` before every drop (`journalctl -k | grep zt-drop-`). A flow is open only
+if both ends allow it: the source's output chain and the destination's input chain.
+
+Anti lock-out: SSH from the i5 over mgmt is part of the policy (`infra: admin-ssh`, checked
+by the unit tests). On top of that, `zt-nft-apply` saves the live ruleset and arms a 120 s
+systemd timer that restores it, then loads the new rules; Ansible opens a *fresh* SSH
+connection and only then disarms the timer. A ruleset that cuts SSH undoes itself.
+
+Tests probe real TCP connections for every source x destination x port of
+`build/matrix.json`: allowed = handshake or RST (nothing listening yet), denied = timeout
+or no route. The i5 has SSH only: it cannot reach the CA, and that is tested too.
