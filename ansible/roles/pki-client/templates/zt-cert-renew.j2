@@ -12,7 +12,9 @@ if [ "${1:-}" != "--force" ]; then
   set -e
   if [ "$rc" -eq 1 ]; then exit 0; fi          # 1 = not due yet
 fi
-"$STEP" ca renew --force "$CRT" "$KEY" --ca-url "$CA_URL" --root "$ROOT"
+# same argument order as the stage 3 test (positionals first): a flag placed before them
+# makes step stop parsing flags and report "too many positional arguments"
+"$STEP" ca renew "$CRT" "$KEY" --ca-url "$CA_URL" --root "$ROOT" --force
 chown root:zt-tls "$CRT"
 chmod 0644 "$CRT"
 logger -t zt-cert-renew "renewed $CRT, now valid until $("$STEP" certificate inspect --format json "$CRT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["validity"]["end"])')"
