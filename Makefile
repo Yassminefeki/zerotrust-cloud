@@ -66,7 +66,7 @@ wait:  ## wait until every VM answers SSH over mgmt and cloud-init has finished
 	$(ANSIBLE) ansible all -m ansible.builtin.shell -a "cloud-init status --wait >/dev/null; rc=\$$?; [ \$$rc -eq 0 ] || [ \$$rc -eq 2 ]"
 
 recreate-vms: gen  ## destroy and re-create the 6 VMs + their disks (keeps networks and base image)
-	$(TF) destroy -input=false -auto-approve -target=libvirt_domain.vm -target=libvirt_volume.disk $(TFVARS)
+	$(TF) destroy -input=false -auto-approve -refresh=false -target=libvirt_domain.vm -target=libvirt_volume.disk $(TFVARS)
 	$(MAKE) --no-print-directory infra
 
 test-2: venv gen  ## stage 2: networks, VMs, IPs, routes, isolation, apt cache
@@ -129,7 +129,9 @@ up: host infra ca firewall wireguard certs services  ## build everything, in the
 test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8  ## run every test, stage by stage
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
-	$(TF) destroy -input=false -auto-approve $(TFVARS)
+	# -refresh=false: nothing needs reading back before deletion, and the provider fails the
+	# whole destroy when it cannot re-read a cloud-init ISO ("corrupted-image: EOF")
+	$(TF) destroy -input=false -auto-approve -refresh=false $(TFVARS)
 
 clean:  ## remove generated files (keeps env.yaml and secrets)
 	rm -rf $(BUILD) .pytest_cache
