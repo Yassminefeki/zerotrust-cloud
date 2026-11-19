@@ -462,6 +462,13 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
         if r.src.kind == "node" and r.src.name == node:
             calls[r.service] = {"address": f"{r.dst.addr}:{r.port}",
                                 "expected_id": spiffe(policy, r.dst.name)}
+    # PostgreSQL speaks its own protocol: tell both ends which database/role the flow is for.
+    for name, entry in list(serves.items()) + list(calls.items()):
+        svc = policy["services"][name]
+        if "db_user" in svc:
+            entry.update(protocol="postgres", db_name=svc["db_name"], db_user=svc["db_user"])
+        else:
+            entry.setdefault("protocol", "https")
     return {"node": node, "identity": spiffe(policy, node), "min_tls": policy["cert"]["min_tls"],
             "serves": serves, "calls": calls}
 
@@ -634,11 +641,24 @@ def render_inventory(policy: dict, env: dict) -> dict:
              for n, s in policy["nodes"].items()}
     # Role groups derived from the policy, so playbooks never name a VM.
     wg = {n: {} for n, s in policy["nodes"].items() if "tunnel" in s["interfaces"]}
+    rules = resolve(policy)
+    mtls_nodes = sorted({r.dst.name for r in rules if r.mtls and r.dst.kind == "node"}
+                        | {r.src.name for r in rules if r.mtls and r.src.kind == "node"})
+    db_nodes = sorted({s["node"] for s in policy["services"].values() if "db_user" in s})
+    order = list(policy["nodes"])
+    grp = lambda names: {n: {} for n in sorted(names, key=order.index)}  # noqa: E731
     return {"all": {"vars": {"ansible_user": env["ssh_user"],
                              "ansible_ssh_private_key_file": private_key_file(env),
                              "ansible_python_interpreter": "/usr/bin/python3"},
                     "hosts": hosts,
-                    "children": {"wireguard": {"hosts": wg}}}}
+                    "children": {
+                        "wireguard": {"hosts": wg},
+                        # pki: every node with an mTLS identity gets a cert + renewal timer
+                        "pki": {"hosts": grp(mtls_nodes)},
+                        # app: the stdlib mTLS service (frontend proxy, service-a, service-b)
+                        "app": {"hosts": grp(n for n in mtls_nodes if n not in db_nodes)},
+                        "postgres": {"hosts": grp(db_nodes)},
+                    }}}
 
 
 def private_key_file(env: dict) -> str:

@@ -10,3 +10,9 @@
 
 - name: Stage 5 - WireGuard on the gateway
   ansible.builtin.import_playbook: wireguard.yml
+
+- name: Stage 6 - workload and client certificates
+  ansible.builtin.import_playbook: certs.yml
+
+- name: Stage 7 - PostgreSQL and the mTLS services
+  ansible.builtin.import_playbook: services.yml

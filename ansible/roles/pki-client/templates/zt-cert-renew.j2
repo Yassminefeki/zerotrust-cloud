@@ -1,0 +1,19 @@
+#!/bin/sh
+# zt-cert-renew [--force] — renew this VM's certificate over mTLS (the current cert proves the
+# identity) when less than EXPIRES_IN is left, then run HOOK so the service picks it up.
+# Managed by Ansible (role pki-client).
+set -eu
+. {{ zt_pki_dir }}/renew.env
+STEP=$(command -v step || command -v step-cli)
+if [ "${1:-}" != "--force" ]; then
+  set +e
+  "$STEP" certificate needs-renewal "$CRT" --expires-in "$EXPIRES_IN" >/dev/null 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 1 ]; then exit 0; fi          # 1 = not due yet
+fi
+"$STEP" ca renew --force "$CRT" "$KEY" --ca-url "$CA_URL" --root "$ROOT"
+chown root:zt-tls "$CRT"
+chmod 0644 "$CRT"
+logger -t zt-cert-renew "renewed $CRT, now valid until $("$STEP" certificate inspect --format json "$CRT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["validity"]["end"])')"
+sh -c "$HOOK" || logger -t zt-cert-renew "hook failed: $HOOK"

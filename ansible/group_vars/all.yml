@@ -21,3 +21,9 @@ zt_wg: "{{ lookup('ansible.builtin.file', zt_build ~ '/wireguard/wireguard.json'
 wg_secrets: "{{ zt_secrets }}/wireguard"
 # Exported client configs (contain a private key): build/export/<peer>/wg0.conf, mode 0600
 wg_export: "{{ zt_build }}/export"
+
+# Workload identity on every VM of group "pki" (stage 6). Group zt-tls may read the key.
+zt_pki_dir: /etc/zt/pki
+zt_cert: "{{ zt_pki_dir }}/cert.crt"      # leaf + intermediate
+zt_key: "{{ zt_pki_dir }}/cert.key"       # generated on the VM, never leaves it
+zt_root: "{{ zt_pki_dir }}/root_ca.crt"

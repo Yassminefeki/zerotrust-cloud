@@ -1,0 +1,2 @@
+# PostgreSQL re-reads its TLS files on reload (no connection is dropped).
+zt_cert_hook: "systemctl try-reload-or-restart postgresql.service"

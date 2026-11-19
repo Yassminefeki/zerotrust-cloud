@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly check: renew the mTLS certificate when less than {{ zt_pki.renew_before }} is left
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,93 @@
+# Stage 6 — workload and client certificates. `make certs`
+#   * every node with an mTLS identity (inventory group "pki"): key generated on the VM,
+#     24h certificate from step-ca via a one-time token, hourly renewal timer;
+#   * tunnel clients (i7, test-peer): key generated on the i5 (ansible/.secrets/pki, 0600),
+#     CSR signed by the CA. The i7 copy goes to build/export/i7/ next to its wg0.conf.
+- name: Artifacts and secrets
+  ansible.builtin.import_playbook: artifacts.yml
+
+- name: Workload certificates
+  hosts: pki
+  become: true
+  gather_facts: false
+  roles:
+    - pki-client
+
+- name: Client certificates for tunnel clients
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    pki_secrets: "{{ zt_secrets }}/pki"
+    clients: "{{ zt_pki.identities | dict2items | selectattr('value.kind', 'equalto', 'client') | list }}"
+  tasks:
+    - name: Private directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: "{{ [pki_secrets] + (clients | map(attribute='key') | map('regex_replace', '^', pki_secrets ~ '/') | list) }}"
+
+    - name: Client key (EC P-256), generated on the i5, never overwritten
+      ansible.builtin.shell: >-
+        umask 077 && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+        -out {{ (pki_secrets ~ '/' ~ item.key ~ '/client.key') | quote }}
+      args:
+        creates: "{{ pki_secrets }}/{{ item.key }}/client.key"
+      loop: "{{ clients }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Does the client certificate need (re)issuing? (missing, other root, < renew_before left)
+      ansible.builtin.shell: |
+        d={{ (pki_secrets ~ '/' ~ item.key) | quote }}
+        [ -s "$d/client.crt" ] || { echo issue; exit 0; }
+        openssl verify -CAfile {{ (zt_build ~ '/pki/root_ca.crt') | quote }} -untrusted "$d/client.crt" "$d/client.crt" >/dev/null 2>&1 || { echo issue; exit 0; }
+        secs=$(( {{ zt_pki.renew_before | regex_replace('h$', '') | int }} * 3600 ))
+        openssl x509 -in "$d/client.crt" -noout -checkend "$secs" >/dev/null && echo ok || echo issue
+      args:
+        executable: /bin/bash
+      register: client_state
+      changed_when: false
+      loop: "{{ clients }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: CSR with exactly the identity's SANs
+      ansible.builtin.command:
+        argv: [openssl, req, -new, -key, "{{ pki_secrets }}/{{ item.item.key }}/client.key",
+               -subj, "/CN={{ item.item.value.cn }}",
+               -addext, "subjectAltName=URI:{{ item.item.value.uri }}{% for d in item.item.value.dns %},DNS:{{ d }}{% endfor %}",
+               -out, "{{ pki_secrets }}/{{ item.item.key }}/client.csr"]
+      when: item.stdout == 'issue'
+      loop: "{{ client_state.results }}"
+      loop_control: {label: "{{ item.item.key }}"}
+
+    - name: Sign on the CA (one-time token; only the CSR travels, never the key)
+      ansible.builtin.include_tasks: tasks/sign_client_csr.yml
+      when: item.stdout == 'issue'
+      loop: "{{ client_state.results }}"
+      loop_control: {label: "{{ item.item.key }}", loop_var: item}
+
+    - name: Client files are private
+      ansible.builtin.file:
+        path: "{{ pki_secrets }}/{{ item.0.key }}/{{ item.1 }}"
+        mode: "0600"
+      loop: "{{ clients | product(['client.key', 'client.crt']) | list }}"
+      loop_control: {label: "{{ item.0.key }}/{{ item.1 }}"}
+
+    - name: Export the i7 identity (cert, key, root) next to its wg0.conf
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ wg_export }}/{{ item.peer }}/{{ item.name }}"
+        mode: "0600"
+      loop: "{{ export_files }}"
+      loop_control: {label: "{{ item.peer }}/{{ item.name }}"}
+      vars:
+        export_files: >-
+          {%- set out = [] -%}
+          {%- for p in zt_wg.peers if not p.test -%}
+          {%- set d = pki_secrets ~ '/client-' ~ p.name -%}
+          {%- set _ = out.extend([
+               {'peer': p.name, 'name': 'client.key', 'src': d ~ '/client.key'},
+               {'peer': p.name, 'name': 'client.crt', 'src': d ~ '/client.crt'},
+               {'peer': p.name, 'name': 'root_ca.crt', 'src': zt_build ~ '/pki/root_ca.crt'}]) -%}
+          {%- endfor -%}{{ out }}

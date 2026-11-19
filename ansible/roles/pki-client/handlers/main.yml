@@ -1,0 +1,5 @@
+- name: Certificate changed
+  ansible.builtin.shell: "{{ zt_cert_hook }}"
+  changed_when: true
+  # the service itself may not be installed yet (stage 7 restarts it anyway)
+  failed_when: false

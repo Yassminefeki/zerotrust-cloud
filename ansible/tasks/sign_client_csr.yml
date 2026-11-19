@@ -1,0 +1,42 @@
+# Sign one client CSR on the CA VM. item = a result of the "need issuing?" check; item.item is
+# the identity (key = name, value = {cn, uri, dns}). Runs from the localhost play.
+- name: "{{ item.item.key }}: CSR to the CA VM"
+  ansible.builtin.copy:
+    src: "{{ pki_secrets }}/{{ item.item.key }}/client.csr"
+    dest: "/tmp/zt-{{ item.item.key }}.csr"
+    mode: "0644"
+  delegate_to: "{{ zt_pki.ca.node }}"
+  become: true
+
+- name: "{{ item.item.key }}: one-time token + signature (24h)"
+  ansible.builtin.shell: >-
+    STEP=$(command -v step || command -v step-cli);
+    TOKEN=$(sudo -u {{ step_user }} env STEPPATH={{ step_path }} $STEP ca token {{ item.item.value.cn | quote }}
+    {% for s in [item.item.value.uri] + item.item.value.dns %}--san {{ s | quote }} {% endfor %}
+    --provisioner {{ zt_pki.ca.provisioner | quote }}
+    --provisioner-password-file {{ step_path }}/secrets/provisioner-password
+    --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt --not-after 5m) &&
+    $STEP ca sign /tmp/zt-{{ item.item.key }}.csr /tmp/zt-{{ item.item.key }}.crt
+    --token "$TOKEN" --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt --force
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ zt_pki.ca.node }}"
+  become: true
+  no_log: true
+
+- name: "{{ item.item.key }}: certificate back to the i5"
+  ansible.builtin.fetch:
+    src: "/tmp/zt-{{ item.item.key }}.crt"
+    dest: "{{ pki_secrets }}/{{ item.item.key }}/client.crt"
+    flat: true
+  delegate_to: "{{ zt_pki.ca.node }}"
+  become: true
+
+- name: "{{ item.item.key }}: clean up on the CA"
+  ansible.builtin.file:
+    path: "/tmp/zt-{{ item.item.key }}.{{ ext }}"
+    state: absent
+  loop: [csr, crt]
+  loop_control: {loop_var: ext}
+  delegate_to: "{{ zt_pki.ca.node }}"
+  become: true

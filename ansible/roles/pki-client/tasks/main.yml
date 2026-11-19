@@ -1,0 +1,137 @@
+---
+# A 24h SPIFFE certificate per workload, from step-ca, renewed automatically.
+#   * the key is generated ON the VM by `step ca certificate` and never leaves it;
+#   * enrolment uses a ONE-TIME token minted on the CA VM (the provisioner password stays there,
+#     the token is valid 5 minutes and the CA refuses a second use);
+#   * renewal (timer, hourly) re-authenticates with the current certificate over mTLS, once less
+#     than renew_before (8h) is left. An expired cert cannot be renewed: re-run `make certs`.
+- name: Identity of this VM (from build/pki/pki.json)
+  ansible.builtin.set_fact:
+    zt_ident: "{{ zt_pki.identities[inventory_hostname] }}"
+
+- name: Group allowed to read the TLS key
+  ansible.builtin.group:
+    name: zt-tls
+    system: true
+
+- name: PKI directory
+  ansible.builtin.file:
+    path: "{{ zt_pki_dir }}"
+    state: directory
+    owner: root
+    group: zt-tls
+    mode: "0750"
+
+- name: Package cache directory
+  ansible.builtin.file:
+    path: /var/cache/zerotrust
+    state: directory
+    mode: "0755"
+
+- name: Copy step-cli (downloaded on the i5; the VM has no internet)
+  ansible.builtin.copy:
+    src: "{{ zt_artifacts }}/step-cli_amd64.deb"
+    dest: /var/cache/zerotrust/step-cli_amd64.deb
+    mode: "0644"
+
+- name: Install step-cli
+  ansible.builtin.apt:
+    deb: /var/cache/zerotrust/step-cli_amd64.deb
+
+- name: Root of trust (pinned, fetched from the CA in stage 3)
+  ansible.builtin.copy:
+    src: "{{ zt_build }}/pki/root_ca.crt"
+    dest: "{{ zt_root }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Is a valid certificate for THIS identity already here (and not due for renewal)?
+  ansible.builtin.shell: |
+    STEP=$(command -v step || command -v step-cli)
+    [ -s {{ zt_cert }} ] && [ -s {{ zt_key }} ] || { echo missing; exit 0; }
+    $STEP certificate verify {{ zt_cert }} --roots {{ zt_root }} >/dev/null 2>&1 || { echo invalid; exit 0; }
+    $STEP certificate inspect --format json {{ zt_cert }} | python3 -c '
+    import json,sys; c=json.load(sys.stdin); s=c["extensions"]["subject_alt_name"]
+    ok = (s.get("uniform_resource_identifiers")==[sys.argv[1]] and c["subject"]["common_name"]==[sys.argv[2]])
+    print("ok" if ok else "other-identity")' {{ zt_ident.uri | quote }} {{ zt_ident.cn | quote }} | grep -qx ok || { echo other-identity; exit 0; }
+    set +e; $STEP certificate needs-renewal {{ zt_cert }} --expires-in {{ zt_pki.renew_before }} >/dev/null 2>&1; rc=$?; set -e
+    [ $rc -eq 1 ] && echo ok || echo renew
+  args:
+    executable: /bin/bash
+  register: zt_cert_state
+  changed_when: false
+
+- name: Enrol when the certificate is missing, invalid, for another identity or due
+  when: zt_cert_state.stdout != 'ok'
+  block:
+    - name: One-time token, minted on the CA VM (5 min, bound to this identity's SANs)
+      ansible.builtin.shell: >-
+        sudo -u {{ step_user }} env STEPPATH={{ step_path }}
+        $(command -v step || command -v step-cli) ca token {{ zt_ident.cn | quote }}
+        {% for s in [zt_ident.uri] + zt_ident.dns + zt_ident.ips %}--san {{ s | quote }} {% endfor %}
+        --provisioner {{ zt_pki.ca.provisioner | quote }}
+        --provisioner-password-file {{ step_path }}/secrets/provisioner-password
+        --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt --not-after 5m
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ zt_pki.ca.node }}"
+      register: zt_token
+      changed_when: false
+      no_log: true
+
+    - name: Key generated here + certificate (24h) from the CA
+      ansible.builtin.shell: >-
+        $(command -v step || command -v step-cli) ca certificate {{ zt_ident.cn | quote }}
+        {{ zt_cert }} {{ zt_key }} --token "$ZT_TOKEN"
+        --ca-url {{ zt_pki.ca.url }} --root {{ zt_root }} --force
+      args:
+        executable: /bin/bash
+      environment:
+        ZT_TOKEN: "{{ zt_token.stdout | trim }}"
+      no_log: true
+      notify: Certificate changed
+
+- name: Certificate readable, key readable by zt-tls only
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: zt-tls
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ zt_cert }}", mode: "0644"}
+    - {path: "{{ zt_key }}", mode: "0640"}
+
+- name: Renewal settings
+  ansible.builtin.copy:
+    dest: "{{ zt_pki_dir }}/renew.env"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      CRT={{ zt_cert }}
+      KEY={{ zt_key }}
+      ROOT={{ zt_root }}
+      CA_URL={{ zt_pki.ca.url }}
+      EXPIRES_IN={{ zt_pki.renew_before }}
+      HOOK="{{ zt_cert_hook }}"
+
+- name: Renewal script
+  ansible.builtin.template:
+    src: zt-cert-renew.j2
+    dest: /usr/local/sbin/zt-cert-renew
+    mode: "0755"
+
+- name: Renewal service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: [zt-cert-renew.service, zt-cert-renew.timer]
+
+- name: Timer enabled (hourly; renews when < renew_before is left)
+  ansible.builtin.systemd_service:
+    name: zt-cert-renew.timer
+    enabled: true
+    state: started
+    daemon_reload: true

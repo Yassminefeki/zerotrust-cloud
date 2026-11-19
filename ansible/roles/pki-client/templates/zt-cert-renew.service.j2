@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew this VM's mTLS certificate (step-ca, {{ zt_pki.lifetime }} certs)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zt-cert-renew

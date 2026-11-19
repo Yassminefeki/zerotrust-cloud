@@ -1,0 +1,63 @@
+---
+# The mTLS service (frontend proxy, service-a, service-b): /usr/local/bin/zt-mtls, configured by
+# build/nodes/<vm>/mtls.json (generated from policy.yaml), certificate from stage 6.
+- name: This VM's mTLS config (who may call me, whom I call and which identity I expect)
+  ansible.builtin.set_fact:
+    zt_mtls: "{{ lookup('ansible.builtin.file', zt_build ~ '/nodes/' ~ inventory_hostname ~ '/mtls.json') | from_json }}"
+
+- name: psycopg2 where the service calls the database (through the apt cache on the i5)
+  ansible.builtin.apt:
+    name: python3-psycopg2
+    update_cache: true
+    cache_valid_time: 3600
+  when: zt_mtls.calls.values() | selectattr('protocol', 'equalto', 'postgres') | list | length > 0
+
+- name: Unprivileged service user, allowed to read the TLS key
+  ansible.builtin.user:
+    name: zt-app
+    system: true
+    groups: zt-tls
+    append: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Service program
+  ansible.builtin.copy:
+    src: zt-mtls
+    dest: /usr/local/bin/zt-mtls
+    mode: "0755"
+  notify: Restart zt-mtls
+
+- name: mTLS config generated from policy.yaml
+  ansible.builtin.copy:
+    src: "{{ zt_build }}/nodes/{{ inventory_hostname }}/mtls.json"
+    dest: /etc/zt/mtls.json
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart zt-mtls
+
+- name: Hardened systemd unit
+  ansible.builtin.template:
+    src: zt-mtls.service.j2
+    dest: /etc/systemd/system/zt-mtls.service
+    mode: "0644"
+  notify: Restart zt-mtls
+
+- name: Running and enabled
+  ansible.builtin.systemd_service:
+    name: zt-mtls
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply changes now
+  ansible.builtin.meta: flush_handlers
+
+- name: Listening on exactly the policy address
+  ansible.builtin.wait_for:
+    host: "{{ item.value.listen.rsplit(':', 1)[0] }}"
+    port: "{{ item.value.port }}"
+    timeout: 30
+  loop: "{{ zt_mtls.serves | dict2items }}"
+  loop_control: {label: "{{ item.key }} {{ item.value.listen }}"}

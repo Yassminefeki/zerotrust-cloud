@@ -129,7 +129,11 @@ def test_mtls_allowlists(build):
     assert mtls(build, "service-a")["serves"]["api-a"]["allowed_ids"] == ["spiffe://cloud.local/frontend"]
     assert mtls(build, "service-b")["serves"]["api-b"]["allowed_ids"] == ["spiffe://cloud.local/service-a"]
     assert mtls(build, "frontend")["calls"] == {
-        "api-a": {"address": "10.30.0.11:9443", "expected_id": "spiffe://cloud.local/service-a"}}
+        "api-a": {"address": "10.30.0.11:9443", "expected_id": "spiffe://cloud.local/service-a",
+                  "protocol": "https"}}
+    pg_call = mtls(build, "service-b")["calls"]["postgres"]
+    assert (pg_call["protocol"], pg_call["db_name"], pg_call["db_user"]) == ("postgres", "appdb", "service_b")
+    assert mtls(build, "database")["serves"]["postgres"]["allowed_sources"] == ["10.40.0.11"]
     assert mtls(build, "service-b")["calls"]["postgres"]["expected_id"] == "spiffe://cloud.local/database"
     for n in NODES:
         m = mtls(build, n)
@@ -168,9 +172,12 @@ def test_test_peer_is_hostile_and_direct(build, env):
     assert env["entry_point"] not in cli
 
 
-def test_inventory_wireguard_group(build):
-    inv = yaml.safe_load((build / "inventory.yml").read_text())
-    assert inv["all"]["children"]["wireguard"]["hosts"] == {"gateway": {}}
+def test_inventory_role_groups(build):
+    ch = yaml.safe_load((build / "inventory.yml").read_text())["all"]["children"]
+    assert list(ch["wireguard"]["hosts"]) == ["gateway"]
+    assert list(ch["pki"]["hosts"]) == ["frontend", "service-a", "service-b", "database"]
+    assert list(ch["app"]["hosts"]) == ["frontend", "service-a", "service-b"]
+    assert list(ch["postgres"]["hosts"]) == ["database"]
 
 
 def test_wireguard_json(build):

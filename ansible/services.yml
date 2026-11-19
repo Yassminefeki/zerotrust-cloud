@@ -1,0 +1,19 @@
+# Stage 7 — the services. `make services`
+#   database: PostgreSQL, TLS 1.3, client certificate only (pg_hba from policy.yaml)
+#   frontend, service-a, service-b: zt-mtls (mTLS 1.3, SPIFFE allowlists from policy.yaml)
+# Database first, so the chain works as soon as the last service starts.
+- name: PostgreSQL
+  hosts: postgres
+  become: true
+  gather_facts: false
+  roles:
+    - role: pki-client   # make sure the certificate is there and fresh (no-op if it is)
+    - postgres
+
+- name: mTLS services
+  hosts: app
+  become: true
+  gather_facts: false
+  roles:
+    - pki-client
+    - app

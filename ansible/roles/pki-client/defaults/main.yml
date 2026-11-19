@@ -1,0 +1,3 @@
+# Paths live in group_vars/all.yml (shared with the app and postgres roles).
+# Run after every renewal so the service serves the new certificate.
+zt_cert_hook: "systemctl try-restart zt-mtls.service"

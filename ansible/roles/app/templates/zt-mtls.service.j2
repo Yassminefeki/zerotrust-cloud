@@ -1,0 +1,35 @@
+[Unit]
+Description=zt-mtls ({{ zt_mtls.identity }}) — mTLS service generated from policy.yaml
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=zt-app
+Group=zt-app
+SupplementaryGroups=zt-tls
+ExecStart=/usr/bin/python3 /usr/local/bin/zt-mtls /etc/zt/mtls.json /etc/zt/pki
+Restart=on-failure
+RestartSec=2
+# hardening: read-only system, no privilege, IPv4 + unix sockets only
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

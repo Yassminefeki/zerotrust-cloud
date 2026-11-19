@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""zt-mtls — the frontend proxy and service-a/b: one small mTLS service, configured by the
+mtls.json that tools/gen_rules.py generates from policy.yaml.
+
+Server side, for every listener in "serves":
+  * TLS 1.3 only, client certificate REQUIRED and verified against the pinned root
+    (no cert / other CA / expired cert -> the handshake fails);
+  * then the caller's SPIFFE ID (URI SAN) must be in allowed_ids and its address in
+    allowed_sources, otherwise 403. Every refusal is logged ("zt-mtls refused ...").
+Client side, for every entry in "calls":
+  * TLS 1.3 only, own certificate presented, server verified against the root AND its IP SAN,
+    AND its SPIFFE ID must equal expected_id before any byte of the request is sent;
+  * protocol "postgres": libpq (psycopg2) with sslmode=verify-full + client certificate.
+
+Routes: GET /health  -> who am I, who are you, TLS version
+        GET /chain?marker=X -> this hop + the next hop's answer (down to the database)
+"""
+import http.client
+import ipaddress
+import json
+import logging
+import socket
+import ssl
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, quote, urlparse
+
+CONF_PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/zt/mtls.json"
+PKI = sys.argv[2] if len(sys.argv) > 2 else "/etc/zt/pki"
+CERT, KEY, ROOT = f"{PKI}/cert.crt", f"{PKI}/cert.key", f"{PKI}/root_ca.crt"
+CONF = json.load(open(CONF_PATH))
+TLS13 = ssl.TLSVersion.TLSv1_3
+assert CONF.get("min_tls") == "1.3", "this service only implements TLS 1.3"
+
+logging.basicConfig(level=logging.INFO, format="zt-mtls %(message)s", stream=sys.stdout)
+log = logging.getLogger()
+
+
+def spiffe_ids(peercert):
+    return [v for k, v in (peercert or {}).get("subjectAltName", ()) if k == "URI"]
+
+
+def server_context():
+    c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    c.minimum_version = c.maximum_version = TLS13
+    c.load_cert_chain(CERT, KEY)
+    c.load_verify_locations(ROOT)
+    c.verify_mode = ssl.CERT_REQUIRED
+    return c
+
+
+def client_context():
+    c = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)        # CERT_REQUIRED + check_hostname
+    c.minimum_version = c.maximum_version = TLS13
+    c.load_verify_locations(ROOT)
+    c.load_cert_chain(CERT, KEY)
+    return c
+
+
+# ----------------------------------------------------------------- client --
+def call_https(name, path):
+    spec = CONF["calls"][name]
+    host, port = spec["address"].rsplit(":", 1)
+    conn = http.client.HTTPSConnection(host, int(port), context=client_context(), timeout=10)
+    try:
+        conn.connect()
+        ids = spiffe_ids(conn.sock.getpeercert())
+        if ids != [spec["expected_id"]]:
+            raise PermissionError(f"{spec['address']} presented {ids}, expected {spec['expected_id']}")
+        conn.request("GET", path)
+        r = conn.getresponse()
+        body = r.read()
+        if r.status != 200:
+            raise RuntimeError(f"{name} answered {r.status}: {body[:200]!r}")
+        return json.loads(body)
+    finally:
+        conn.close()
+
+
+def call_postgres(name, marker):
+    import psycopg2   # only the node that calls the database needs it
+    spec = CONF["calls"][name]
+    host, port = spec["address"].rsplit(":", 1)
+    conn = psycopg2.connect(host=host, port=int(port), dbname=spec["db_name"], user=spec["db_user"],
+                            sslmode="verify-full", sslrootcert=ROOT, sslcert=CERT, sslkey=KEY,
+                            ssl_min_protocol_version="TLSv1.3", connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT current_user, %s::text,
+                                  (SELECT count(*) FROM items),
+                                  s.version, s.client_dn
+                           FROM pg_stat_ssl s WHERE s.pid = pg_backend_pid()""", (marker,))
+            user, echo, items, version, client_dn = cur.fetchone()
+        return {"node": "database", "db_user": user, "marker": echo, "items": items,
+                "tls": version, "client_dn": client_dn}
+    finally:
+        conn.close()
+
+
+def next_hop(marker):
+    for name, spec in CONF["calls"].items():
+        if spec.get("protocol") == "postgres":
+            return call_postgres(name, marker)
+        return call_https(name, f"/chain?marker={quote(marker)}")
+    return None
+
+
+# ----------------------------------------------------------------- server --
+class Handler(BaseHTTPRequestHandler):
+    server_version = "zt-mtls"
+    sys_version = ""
+    listener = None    # set per server
+
+    def setup(self):
+        self.peer_id = None
+        self.request.settimeout(10)
+        try:
+            self.request.do_handshake()
+        except (ssl.SSLError, OSError) as e:
+            log.info("refused %s: tls handshake: %s", self.client_address[0], e)
+            raise ConnectionAbortedError from e
+        super().setup()
+
+    def log_message(self, fmt, *args):
+        log.info("%s %s %s", self.client_address[0], self.peer_id, fmt % args)
+
+    def _send(self, code, obj):
+        body = (json.dumps(obj) + "\n").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def authorize(self):
+        ids = spiffe_ids(self.request.getpeercert())
+        self.peer_id = ids[0] if len(ids) == 1 else None
+        src = ipaddress.ip_address(self.client_address[0])
+        if not any(src in ipaddress.ip_network(n) for n in self.listener["allowed_sources"]):
+            reason = f"source {src} not allowed"
+        elif self.peer_id not in self.listener["allowed_ids"]:
+            reason = f"identity {ids} not allowed"
+        else:
+            return True
+        log.info("refused %s: %s", src, reason)
+        self._send(403, {"error": "forbidden", "reason": reason})
+        return False
+
+    def do_GET(self):
+        if not self.authorize():
+            return
+        url = urlparse(self.path)
+        me = {"node": CONF["node"], "identity": CONF["identity"], "peer": self.peer_id,
+              "tls": self.request.version()}
+        if url.path == "/health":
+            return self._send(200, me)
+        if url.path == "/chain":
+            marker = parse_qs(url.query).get("marker", [""])[0]
+            try:
+                me.update(marker=marker, next=next_hop(marker))
+            except Exception as e:     # report which hop failed, never hang
+                log.info("downstream error: %s", e)
+                return self._send(502, dict(me, error=f"{type(e).__name__}: {e}"))
+            return self._send(200, me)
+        return self._send(404, {"error": "not found"})
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, listener):
+        host, port = listener["listen"].rsplit(":", 1)
+        handler = type("H", (Handler,), {"listener": listener})
+        super().__init__((host, int(port)), handler, bind_and_activate=False)
+        self.socket = server_context().wrap_socket(self.socket, server_side=True,
+                                                   do_handshake_on_connect=False)
+        self.allow_reuse_address = True
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_bind()
+        self.server_activate()
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def main():
+    https = {n: l for n, l in CONF["serves"].items() if l.get("protocol", "https") == "https"}
+    if not https:
+        sys.exit("nothing to serve")
+    servers = [Server(l) for l in https.values()]
+    for n, l in https.items():
+        log.info("serving %s on %s as %s, allowed %s", n, l["listen"], CONF["identity"], l["allowed_ids"])
+    for s in servers[1:]:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    servers[0].serve_forever()
+
+
+if __name__ == "__main__":
+    main()

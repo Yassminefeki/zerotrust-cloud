@@ -5,8 +5,24 @@ declared caller reaches each service, every hop is encrypted (WireGuard, then
 mTLS with TLS 1.3), and the "who talks to whom" rule is written once in
 `policy.yaml`, generated into enforcement, and tested.
 
-> Status: **stage 0** (policy + generator + offline tests). The full README
-> (architecture diagram, operations, troubleshooting) is written in stage 8.
+```
+ i7 (client) ──WireGuard──► i5 Wi-Fi (DNAT by interface name) ──► VM1 gateway  wg0 10.10.0.1
+                                                                   │ nftables: tunnel → frontend:8443 only
+ net-dmz 10.20.0.0/24 ─────────────────────────────────────────────┤
+                                                    VM2 frontend 10.20.0.10:8443  (mTLS, TLS 1.3)
+ net-app 10.30.0.0/24                                    │ mTLS
+                                                    VM3 service-a 10.30.0.11:9443
+                                                         │ mTLS
+                                                    VM4 service-b 10.30.0.12:9443
+ net-data 10.40.0.0/24                                   │ TLS 1.3 + client certificate
+                                                    VM5 database 10.40.0.10:5432 (PostgreSQL)
+ net-mgmt 10.50.0.0/24  i5 10.50.0.1 (SSH, apt cache) · VM6 ca-internal 10.50.0.10:9000 (step-ca)
+```
+
+Three independent locks on every hop: the **network** (nftables default-drop on every VM,
+generated from the policy), the **transport** (WireGuard outside, TLS 1.3 inside) and the
+**identity** (24h SPIFFE certificates; each server checks the CA *and* an allowlist
+generated from the policy).
 
 ## Two files, two jobs
 
@@ -37,24 +53,31 @@ mgmt, IPs outside their network, duplicate IPs, flows between VMs that share
 no network (VMs are never routed; only the gateway forwards, and only
 tunnel → frontend:8443).
 
-## Quick start (so far)
+## Quick start
 
 ```bash
 cp env.example.yaml env.yaml   # set wan_interface (ip -br link) and entry_point (<hostname>.local)
-make test-0                    # stage 0: offline tests
-make host                      # stage 1: prepare the i5 (sudo password asked once)
-make test-1                    # stage 1: preflight tests
-make infra                     # stage 2: networks + 6 VMs (terraform), waits for cloud-init
-make test-2                    # stage 2: networks, IPs, routes, isolation
-ssh -F build/ssh_config frontend   # SSH to any VM over mgmt
-make destroy                   # remove VMs/networks (host prep stays)
-make ca                        # stage 3: step-ca on the CA VM
-make test-3                    # stage 3: CA tests (issuance + refusals)
-make firewall                  # stage 4: nftables default-drop on every VM
-make test-4                    # stage 4: live rulesets + NxN TCP probes
-make wireguard                 # stage 5: WireGuard keys + wg0 on the gateway + client exports
-make test-5                    # stage 5: handshake, tunnel -> frontend only, impersonation
+make up                        # everything, in the safe order (sudo password asked once, stage 1)
+make test                      # every stage's tests, in order, stops at the first failure
 ```
+
+Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
+
+| Stage | Build | Test | What the tests prove |
+|---|---|---|---|
+| 0 | `make gen` | `make test-0` | policy valid, generated rules exact, mTLS service + 4 refusals (offline) |
+| 1 | `make host` | `make test-1` | i5 ready: DNAT by interface name, apt cache, mDNS name resolves |
+| 2 | `make infra` | `make test-2` | networks isolated, 6 VMs, exact IPs/routes, nothing routed |
+| 3 | `make ca` | `make test-3` | step-ca: TLS 1.3, 24h max, issues only the policy's identities |
+| 4 | `make firewall` | `make test-4` | default drop everywhere, logged, N×N probes from VMs and the i5 |
+| 5 | `make wireguard` | `make test-5` | handshake, tunnel → frontend:8443 only, impersonation fails |
+| 6 | `make certs` | `make test-6` | SPIFFE certs on every mTLS VM, 24h, renewal timer, single-use tokens |
+| 7 | `make services` | `make test-7` | client → frontend → A → B → DB works; no cert / other CA / unlisted ID / expired refused |
+| 8 | — | `make test-8` | tcpdump: no clear text on any bridge; TLS 1.3 everywhere; drift + full N×N |
+
+Other targets: `make destroy` (VMs and networks; host prep stays), `make recreate-vms`,
+`make test-peer` / `make test-peer-down` (the tunnel test client), `make clean`.
+SSH to any VM over mgmt: `ssh -F build/ssh_config frontend`.
 
 ## Host preparation (stage 1) — what `make host` changes on the i5
 
@@ -166,3 +189,71 @@ nc -vz -w 3 10.20.0.10 8443               # succeeded / refused = reachable (ser
 ```
 On the i5, `ssh -F build/ssh_config gateway sudo wg show wg0 endpoints` lists the i7's own LAN
 address for its key: the packets came in through the DNAT, unmasqueraded.
+
+## Certificates (stage 6)
+
+`make certs`, for every VM with an mTLS identity (`frontend`, `service-a`, `service-b`, `database`):
+- the private key is generated **on the VM** by `step ca certificate` and never leaves it;
+- enrolment uses a **one-time token** minted on the CA VM (5 minutes, bound to the identity's
+  SANs; the provisioner password never leaves the CA; a replayed token is refused — tested);
+- certificate: `CN=<vm>`, URI SAN `spiffe://cloud.local/<vm>`, data-plane IPs only, **24h**;
+- `/etc/zt/pki/` = `cert.crt` (leaf + intermediate), `cert.key` (root:zt-tls 0640), `root_ca.crt`;
+- `zt-cert-renew.timer` checks hourly and renews over mTLS (the current cert proves the identity)
+  once less than **8h** is left, then reloads the service. Renewal after expiry is disabled on
+  the CA: a VM switched off for more than 24h is re-enrolled by `make certs`.
+
+Tunnel clients (`client/i7`, `client/test-peer`): key generated on the i5
+(`ansible/.secrets/pki/`, 0600), only the CSR goes to the CA. The i7 copy is exported to
+`build/export/i7/` (`client.crt`, `client.key`, `root_ca.crt`) next to its `wg0.conf`.
+It also lives 24h: run `make certs` and copy it again before using the i7.
+
+## Services (stage 7)
+
+- **zt-mtls** (`ansible/roles/app/files/zt-mtls`, Python stdlib) runs the frontend proxy and
+  service-a/b from the generated `mtls.json`. As a server: TLS 1.3 only, client certificate
+  required and verified against the root; then the caller's SPIFFE ID must be in the allowlist
+  and its address in the declared sources, else **403**. As a client: TLS 1.3, its own cert, the
+  server's IP SAN *and* SPIFFE ID are checked before the request is sent. Unprivileged user,
+  hardened systemd unit, every refusal logged (`journalctl -u zt-mtls | grep refused`).
+- **PostgreSQL**: listens on 10.40.0.10 only, `ssl_min_protocol_version = TLSv1.3`;
+  `pg_hba.conf` (generated) has a single `hostssl appdb service_b 10.40.0.11/32 cert` line;
+  `pg_ident.conf` maps the certificate CN `service-b` to the role `service_b`, which has no
+  password and `SELECT` on one table.
+- `GET https://10.20.0.10:8443/chain?marker=x` walks the whole chain and returns what every hop
+  saw (caller identity, TLS version, the database's `current_user` and client DN).
+
+From the i7, once the tunnel is up:
+```bash
+curl --cacert root_ca.crt --cert client.crt --key client.key https://10.20.0.10:8443/chain?marker=hello
+```
+
+## Confidentiality and drift (stage 8)
+
+- `tests/final/test_confidentiality.py`: tcpdump on **every** `virbr-zt-*` bridge while a random
+  marker crosses tunnel → frontend → A → B → database (which echoes it). The marker must appear
+  in no capture. Guards: a clear-text control packet on mgmt **must** be captured (the capture
+  works), and each hop's packets (51820/udp, 8443, 9443, 5432) must be present (they were seen,
+  encrypted). TLS 1.2 is refused by every server, PostgreSQL included.
+- `tests/final/test_drift.py`: `build/` equals a fresh generation from `policy.yaml`; every live
+  config generated from it is identical on its machine (nftables on the 6 VMs and the i5,
+  `mtls.json`, `pg_hba`/`pg_ident`, WireGuard peers, CA issuance policy); and the **full N×N
+  matrix** (6 VMs + the i5 + a tunnel client × every address × every policy port) is probed:
+  the reachable set must be *exactly* the declared flows, every declared flow must hit a live
+  service, and no deny may answer. Report: `build/drift-report.json`.
+
+## Changing the policy
+
+Edit `policy.yaml` (e.g. add a flow), then `make check && make test-0` (offline), then
+`make firewall services` (or `make up`), then `make test`. The generator rewrites rules,
+allowlists, `pg_hba` and the expected matrix together, so the tests follow the change.
+
+## Troubleshooting
+
+| Symptom | Look at |
+|---|---|
+| a flow times out | `ssh -F build/ssh_config <vm> sudo journalctl -k \| grep zt-drop` (both ends) |
+| mTLS refused | `ssh -F build/ssh_config <vm> sudo journalctl -u zt-mtls \| grep refused` |
+| certificate expired (VM was off > 24h) | `make certs` |
+| firewall change locked SSH out | wait 2 min: the VM rolls back by itself; `make firewall` reports it |
+| i7 tunnel does not come up | `avahi-resolve -4 -n <entry_point>` on the i7; `sudo wg show` on both ends |
+| database refuses | `ssh -F build/ssh_config database sudo journalctl -u postgresql@*` |
