@@ -75,6 +75,10 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | 7 | `make services` | `make test-7` | client → frontend → A → B → DB works; no cert / other CA / unlisted ID / expired refused |
 | 8 | — | `make test-8` | tcpdump: no clear text on any bridge; TLS 1.3 everywhere; drift + full N×N |
 
+The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
+Ubuntu's SHA256SUMS) into `~/.cache/zerotrust/`; `make infra` uploads that local copy, so a
+`make destroy && make up` never downloads it again.
+
 Other targets: `make destroy` (VMs and networks; host prep stays), `make recreate-vms`,
 `make test-peer` / `make test-peer-down` (the tunnel test client), `make clean`.
 SSH to any VM over mgmt: `ssh -F build/ssh_config frontend`.

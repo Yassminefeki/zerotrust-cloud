@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs test-6 services test-7 test-8 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs test-6 services test-7 test-8 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -54,11 +54,20 @@ test-1: venv gen  ## stage 1: host preflight tests (asks for sudo once)
 	$(PYTEST) tests/host -v
 
 # ---------------------------------------------------------------- stage 2 --
-infra: gen  ## stage 2: libvirt networks + 6 VMs (terraform), then wait for cloud-init
+IMAGE_CACHE := $(HOME)/.cache/zerotrust
+
+image: venv env.yaml  ## download the Ubuntu cloud image ONCE (resumable, sha256-verified) to ~/.cache/zerotrust
+	mkdir -p $(BUILD)
+	tools/fetch-image "$$($(PY) -c 'import yaml; print(yaml.safe_load(open("env.yaml"))["ubuntu_image_url"])')" \
+	  $(IMAGE_CACHE) > $(BUILD)/image.path
+	@echo ">> image: $$(cat $(BUILD)/image.path)"
+
+infra: gen image  ## stage 2: libvirt networks + 6 VMs (terraform), then wait for cloud-init
 	$(TF) init -input=false
 	# -parallelism=1: the 6 VMs share one backing image; libvirt changes its owner at each
 	# start (and restores it on failure) without a lock manager, so parallel starts race.
-	$(TF) apply -input=false -auto-approve -parallelism=1 $(TFVARS)
+	# image_url = the verified local copy (overrides the URL from the tfvars): no download here.
+	$(TF) apply -input=false -auto-approve -parallelism=1 $(TFVARS) -var "image_url=$$(cat $(BUILD)/image.path)"
 	$(MAKE) --no-print-directory wait
 
 wait:  ## wait until every VM answers SSH over mgmt and cloud-init has finished
