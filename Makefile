@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs test-6 services test-7 test-8 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -115,27 +115,35 @@ test-5: venv gen  ## stage 5: keys, gateway wg0, handshake, tunnel -> frontend o
 certs: gen  ## stage 6: 24h SPIFFE certs on every mTLS VM + renewal timers, tunnel client certs
 	$(ANSIBLE) ansible-playbook certs.yml
 
-test-6: venv gen  ## stage 6: SANs, 24h, permissions, timer, forced renewal, single-use tokens
+client-certs: gen  ## re-issue the actors' certificates that are missing or about to expire (bot: 1h)
+	$(ANSIBLE) ansible-playbook certs.yml --tags clients
+
+test-6: venv gen client-certs  ## stage 6: SANs, 24h, permissions, timer, forced renewal, single-use tokens
 	$(PYTEST) tests/pki -v
 
 # ---------------------------------------------------------------- stage 7 --
 services: gen  ## stage 7: PostgreSQL (client-cert only) + mTLS services (frontend, service-a/b)
 	$(ANSIBLE) ansible-playbook services.yml
 
-test-7: venv gen  ## stage 7: end-to-end chain, the 4 mTLS refusals, database refusals
+test-7: venv gen client-certs  ## stage 7: end-to-end chain, the 4 mTLS refusals, database refusals
 	sudo -v
 	$(PYTEST) tests/services -v
 
 # ---------------------------------------------------------------- stage 8 --
-test-8: venv gen  ## stage 8: tcpdump confidentiality, TLS 1.3, drift + full NxN matrix
+test-8: venv gen client-certs  ## stage 8: tcpdump confidentiality, TLS 1.3, drift + full NxN matrix
 	sudo -v
 	$(PYTEST) tests/final -v
+
+# ---------------------------------------------------------------- stage 9 --
+test-9: venv gen client-certs  ## stage 9: every actor x every route through the tunnel (200/403/404)
+	sudo -v
+	$(PYTEST) tests/actors -v
 
 # ----------------------------------------------------------------- pipeline --
 up: host infra ca firewall wireguard certs services  ## build everything, in the safe order
 	@echo ">> up: done. Next: make test"
 
-test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8  ## run every test, stage by stage
+test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9  ## run every test, stage by stage
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
 	# -refresh=false: nothing needs reading back before deletion, and the provider fails the

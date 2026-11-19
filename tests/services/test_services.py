@@ -19,7 +19,9 @@ INV = yaml.safe_load((BUILD / "inventory.yml").read_text()) if (BUILD / "invento
 GROUPS = INV.get("all", {}).get("children", {})
 APP = list(GROUPS.get("app", {}).get("hosts", {}))
 DB = list(GROUPS.get("postgres", {}).get("hosts", {}))
-TP_URI = PKI.get("identities", {}).get("client-test-peer", {}).get("uri", "")
+# the test client calls as Dev (staff: diagnostic routes); the bad credentials impersonate Bob
+DEV_URI = PKI.get("identities", {}).get("staff-dev", {}).get("uri", "")
+BOB = PKI.get("identities", {}).get("customer-bob", {})
 
 
 @pytest.fixture(scope="module")
@@ -79,7 +81,7 @@ def test_chain_end_to_end(chain):
         hops.append(h)
         h = h.get("next")
     assert [x["node"] for x in hops] == ["frontend", "service-a", "service-b", "database"]
-    assert hops[0]["peer"] == TP_URI
+    assert hops[0]["peer"] == DEV_URI
     assert hops[1]["peer"] == "spiffe://cloud.local/frontend"
     assert hops[2]["peer"] == "spiffe://cloud.local/service-a"
     db = hops[3]
@@ -101,9 +103,9 @@ def bad(tmp_path_factory, vm):
     ca = vm(PKI["ca"]["node"])
     return {
         "no client certificate": (None, None),
-        "certificate from another CA": other_ca_cert(tmp, TP_URI),
+        "certificate from another CA": other_ca_cert(tmp, BOB["uri"]),
         "identity not in the allowlist": ca_issued_cert(ca, tmp, "service-a"),
-        "expired certificate": expired_cert(ca, tmp, TP_URI, "client-test-peer"),
+        "expired certificate": expired_cert(ca, tmp, BOB["uri"], BOB["cn"]),
     }
 
 

@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--key")
     ap.add_argument("--tls12", action="store_true", help="offer TLS 1.2 ONLY (must be refused)")
     ap.add_argument("--timeout", type=float, default=10)
+    ap.add_argument("--method", default="GET")
+    ap.add_argument("--data", help="request body (JSON text)")
     a = ap.parse_args()
     u = urlparse(a.url)
     out = {"ok": False, "stage": "connect", "status": None, "tls": None, "server_ids": [],
@@ -48,7 +50,9 @@ def main():
         # TLS 1.3: the server checks our certificate AFTER our Finished, so a refusal arrives
         # as an alert on the first read, i.e. here.
         out["stage"] = "response"
-        conn.request("GET", u.path + ("?" + u.query if u.query else ""))
+        body = a.data.encode() if a.data is not None else None
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        conn.request(a.method, u.path + ("?" + u.query if u.query else ""), body=body, headers=headers)
         r = conn.getresponse()
         out["status"] = r.status
         raw = r.read().decode(errors="replace")

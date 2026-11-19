@@ -74,6 +74,7 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | 6 | `make certs` | `make test-6` | SPIFFE certs on every mTLS VM, 24h, renewal timer, single-use tokens |
 | 7 | `make services` | `make test-7` | client → frontend → A → B → DB works; no cert / other CA / unlisted ID / expired refused |
 | 8 | — | `make test-8` | tcpdump: no clear text on any bridge; TLS 1.3 everywhere; drift + full N×N |
+| 9 | `make certs services` | `make test-9` | each actor × each route: allowed, 403 (logged) or 404, exactly as the policy says |
 
 The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
 Ubuntu's SHA256SUMS) into `~/.cache/zerotrust/`; `make infra` uploads that local copy, so a
@@ -261,3 +262,26 @@ allowlists, `pg_hba` and the expected matrix together, so the tests follow the c
 | firewall change locked SSH out | wait 2 min: the VM rolls back by itself; `make firewall` reports it |
 | i7 tunnel does not come up | `avahi-resolve -4 -n <entry_point>` on the i7; `sudo wg show` on both ends |
 | database refuses | `ssh -F build/ssh_config database sudo journalctl -u postgresql@*` |
+
+## Actors and per-route permissions (stage 9)
+
+The cloud now runs **ZT Bank**. `policy.yaml` declares *who* uses it (`actors`, each with a
+`role`) and *what* each role may do on each service (`routes`, default deny):
+
+| Actor | Identity | Role | May (frontend) | Machine |
+|---|---|---|---|---|
+| alice | `spiffe://cloud.local/customer/alice` | customer | her accounts, history, transfers | i7 (`build/export/i7/alice/`) |
+| bob | `spiffe://cloud.local/customer/bob` | customer | same, for his own money | test client on the i5 |
+| dev | `spiffe://cloud.local/staff/dev` | staff | `/api/status`, `/health`, `/chain` — never customer data | i7 (`build/export/i7/dev/`) |
+| statements | `spiffe://cloud.local/bot/statements` | bot | `/api/statements`, `/health`; **1 h** certificate | test client on the i5 |
+
+The generator turns the routes into each service's `mtls.json`; `zt-mtls` then answers
+**404** to a method + path the policy does not declare, **403** to a declared route that is not
+open to the caller (logged with the caller's identity), and serves the rest. Inner services only
+accept their upstream node, and only on their own declared routes.
+
+Same machine, different rights: Alice and Dev both work from the i7, through the same tunnel;
+their certificates, not the network, decide what they can do.
+
+Client certificates are re-issued by `make client-certs` (also run before tests 6–9) when less
+than 8 h are left — or a third of a shorter lifetime (20 min for the bot's 1 h certificate).

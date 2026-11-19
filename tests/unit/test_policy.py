@@ -75,8 +75,13 @@ def test_nodes_are_never_routed(mutable_policy):
 
 
 def test_identity_outside_trust_domain_rejected(mutable_policy):
-    mutable_policy["principals"]["tunnel"]["identities"].append("spiffe://evil.example/x")
+    mutable_policy["principals"]["tunnel"]["identities"] = ["spiffe://evil.example/x"]
     assert gen_rules.validate_policy(mutable_policy)
+
+
+def test_actor_identities_are_derived_inside_the_trust_domain(policy):
+    for a in policy["actors"]:
+        assert gen_rules.actor_uri(policy, a).startswith("spiffe://cloud.local/")
 
 
 def test_secrets_and_env_are_gitignored():

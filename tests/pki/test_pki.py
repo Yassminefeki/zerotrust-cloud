@@ -153,7 +153,8 @@ def test_client_certificates(client):
         assert oct((d / f).stat().st_mode & 0o777) == "0o600", f
     text, life = _openssl_json(d / "client.crt")
     assert f"URI:{ident['uri']}" in text
-    assert 23.9 <= life <= 24.1
+    want = int(ident["lifetime"][:-1]) / (1 if ident["lifetime"].endswith("h") else 60)
+    assert abs(life - want) <= 0.1, f"{client}: {life}h instead of {ident['lifetime']}"
     v = run(["openssl", "verify", "-CAfile", str(ROOT_CA), "-untrusted", str(d / "client.crt"),
              str(d / "client.crt")])
     assert v.returncode == 0, v.stderr
@@ -170,9 +171,17 @@ def test_client_secrets_never_tracked():
         assert run(["git", "-C", str(ROOT), "grep", "-qF", body[:40]]).returncode == 1
 
 
-def test_i7_identity_exported_with_its_tunnel_config():
-    d = BUILD / "export/i7"
-    for f in ("wg0.conf", "client.crt", "client.key", "root_ca.crt"):
-        assert (d / f).exists(), f
-        assert oct((d / f).stat().st_mode & 0o777) == "0o600", f
-    assert (d / "client.crt").read_text() == (SECRETS / "client-i7/client.crt").read_text()
+def test_actor_identities_exported_to_their_machine():
+    """build/export/<peer>/<actor>/: only the actors whose `export_to` names that machine."""
+    exported = {(i["export_to"], i["actor"]): cn for cn, i in PKI["identities"].items() if i.get("export_to")}
+    assert exported, "at least one actor is exported (alice and dev to the i7)"
+    for (peer, actor), cn in exported.items():
+        d = BUILD / "export" / peer / actor
+        for f in ("client.crt", "client.key", "root_ca.crt"):
+            assert oct((d / f).stat().st_mode & 0o777) == "0o600", f"{peer}/{actor}/{f}"
+        assert (d / "client.crt").read_text() == (SECRETS / cn / "client.crt").read_text()
+    for peer_dir in (BUILD / "export").iterdir():
+        for sub in peer_dir.iterdir():
+            if sub.is_dir():
+                assert (peer_dir.name, sub.name) in exported, f"{sub} is not declared in the policy"
+    assert not (BUILD / "export/i7/client.key").exists(), "old single-identity export removed"

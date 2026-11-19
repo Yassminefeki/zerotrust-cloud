@@ -125,7 +125,8 @@ def test_env_change_only_touches_host_and_client_side(policy, env, tmp_path):
 # ------------------------------------------------------------------- mTLS --
 def test_mtls_allowlists(build):
     assert mtls(build, "frontend")["serves"]["https"]["allowed_ids"] == [
-        "spiffe://cloud.local/client/i7", "spiffe://cloud.local/client/test-peer"]
+        "spiffe://cloud.local/customer/alice", "spiffe://cloud.local/customer/bob",
+        "spiffe://cloud.local/staff/dev", "spiffe://cloud.local/bot/statements"]
     assert mtls(build, "service-a")["serves"]["api-a"]["allowed_ids"] == ["spiffe://cloud.local/frontend"]
     assert mtls(build, "service-b")["serves"]["api-b"]["allowed_ids"] == ["spiffe://cloud.local/service-a"]
     assert mtls(build, "frontend")["calls"] == {
@@ -350,15 +351,86 @@ def test_pki_identities_and_ca_policy(build):
     assert pki["ca"]["url"] == "https://10.50.0.10:9000" and pki["lifetime"] == "24h"
     ids = pki["identities"]
     # only nodes that take part in mTLS get a cert; never the gateway or the CA itself
-    assert set(ids) == {"frontend", "service-a", "service-b", "database", "client-i7", "client-test-peer"}
+    assert set(ids) == {"frontend", "service-a", "service-b", "database",
+                        "customer-alice", "customer-bob", "staff-dev", "bot-statements"}
     assert ids["service-b"]["uri"] == "spiffe://cloud.local/service-b"
     assert ids["service-b"]["ips"] == ["10.30.0.12", "10.40.0.11"], "data-plane IPs only, no mgmt"
-    assert ids["client-i7"]["uri"] == "spiffe://cloud.local/client/i7" and ids["client-i7"]["ips"] == []
+    a = ids["customer-alice"]
+    assert (a["uri"], a["ips"], a["role"], a["actor"], a["export_to"], a["lifetime"]) == (
+        "spiffe://cloud.local/customer/alice", [], "customer", "alice", "i7", "24h")
+    assert ids["bot-statements"]["lifetime"] == "1h", "the bot gets a short-lived certificate"
+    assert "export_to" not in ids["customer-bob"], "test actors are never exported"
     allow = pki["x509_policy"]["allow"]
     assert allow["uri"] == ["cloud.local"]
     assert "10.50.0.20" not in allow["ip"], "no mgmt address may ever be certified"
     assert sorted(allow["dns"]) == sorted(i["cn"] for i in ids.values())
     assert pki["x509_policy"]["allowWildcardNames"] is False
+
+
+# ----------------------------------------------------------- actors / routes --
+def routes_of(build, node, svc):
+    """{(method, path): ["customer/alice", "frontend", ...]} without the spiffe://cloud.local/ prefix"""
+    return {(r["method"], r["path"]): sorted(i.split("cloud.local/", 1)[1] for i in r["allow_ids"])
+            for r in mtls(build, node)["serves"][svc]["routes"]}
+
+
+def test_frontend_routes_per_role(build):
+    r = routes_of(build, "frontend", "https")
+    customers = ["customer/alice", "customer/bob"]
+    assert r[("GET", "/api/accounts")] == customers
+    assert r[("POST", "/api/transfers")] == customers
+    assert r[("GET", "/api/statements")] == ["bot/statements"]
+    assert r[("GET", "/api/status")] == ["staff/dev"]
+    assert r[("GET", "/chain")] == ["staff/dev"]
+    assert "staff/dev" not in r[("GET", "/api/accounts")], "support staff never sees balances"
+    assert "bot/statements" not in r[("POST", "/api/transfers")], "the bot never moves money"
+
+
+def test_inner_routes_only_for_the_upstream_node(build):
+    for node, svc, caller in (("service-a", "api-a", "frontend"), ("service-b", "api-b", "service-a")):
+        for (m, p), who in routes_of(build, node, svc).items():
+            assert who == [caller], (node, m, p, who)
+
+
+def test_actor_directory_on_the_frontend(build):
+    actors = mtls(build, "frontend")["actors"]
+    assert actors["spiffe://cloud.local/customer/alice"] == {"actor": "alice", "role": "customer", "customer": "alice"}
+    assert actors["spiffe://cloud.local/staff/dev"] == {"actor": "dev", "role": "staff"}
+    assert mtls(build, "service-a")["actors"] == {}, "inner services only know nodes"
+
+
+def test_every_route_id_is_allowed_by_the_service(build):
+    for node in ("frontend", "service-a", "service-b"):
+        for svc, s in mtls(build, node)["serves"].items():
+            for r in s.get("routes", []):
+                assert set(r["allow_ids"]) <= set(s["allowed_ids"]), (node, r)
+
+
+@pytest.mark.parametrize("mutate,msg", [
+    (lambda p: p["actors"]["alice"].update(role="admin"), "unknown role"),
+    (lambda p: p["actors"]["alice"].pop("customer"), "`customer` is required"),
+    (lambda p: p["actors"]["dev"].update(customer="dev"), "`customer` is required"),
+    (lambda p: p["actors"]["alice"].update(export_to="test-peer"), "real (non-test) WireGuard peer"),
+    (lambda p: p["actors"]["statements"].update(cert_lifetime="48h"), "above the CA maximum"),
+    (lambda p: p["actors"]["statements"].update(cert_lifetime="soon"), "look like 1h"),
+    (lambda p: p["actors"]["alice"].update(entry="nowhere"), "entry must be a principal"),
+    (lambda p: p["routes"]["https"].append({"name": "x", "method": "GET", "path": "/x", "allow": ["root"]}),
+     "neither a role nor a node"),
+    (lambda p: p["routes"]["https"].append({"name": "x", "method": "GET", "path": "/x", "allow": ["database"]}),
+     "has no flow to https"),
+    (lambda p: p["routes"]["api-a"].append({"name": "x", "method": "GET", "path": "/x", "allow": ["customer"]}),
+     "no actor of role customer reaches api-a"),
+    (lambda p: p["routes"]["https"].append({"name": "x", "method": "FETCH", "path": "/x", "allow": ["staff"]}),
+     "method must be"),
+    (lambda p: p["routes"]["https"].append(dict(p["routes"]["https"][0])), "duplicate"),
+    (lambda p: p["routes"].pop("api-b"), "has no routes"),
+    (lambda p: p["routes"].update(postgres=[]), "HTTPS mTLS services only"),
+])
+def test_bad_actors_and_routes_rejected(policy, mutate, msg):
+    p = json.loads(json.dumps(policy))
+    mutate(p)
+    errs = gen_rules.validate_policy(p)
+    assert any(msg in e for e in errs), errs
 
 
 def test_stateless_replies_only_for_ssh(policy, build):

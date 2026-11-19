@@ -8,7 +8,7 @@
   delegate_to: "{{ zt_pki.ca.node }}"
   become: true
 
-- name: "{{ item.item.key }}: one-time token + signature (24h)"
+- name: "{{ item.item.key }}: one-time token + signature ({{ item.item.value.lifetime }})"
   ansible.builtin.shell: >-
     STEP=$(command -v step || command -v step-cli);
     TOKEN=$(sudo -u {{ step_user }} env STEPPATH={{ step_path }} $STEP ca token {{ item.item.value.cn | quote }}
@@ -17,7 +17,8 @@
     --provisioner-password-file {{ step_path }}/secrets/provisioner-password
     --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt --not-after 5m) &&
     $STEP ca sign /tmp/zt-{{ item.item.key }}.csr /tmp/zt-{{ item.item.key }}.crt
-    --token "$TOKEN" --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt --force
+    --token "$TOKEN" --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt
+    --not-after {{ item.item.value.lifetime }} --force
   args:
     executable: /bin/bash
   delegate_to: "{{ zt_pki.ca.node }}"

@@ -12,8 +12,13 @@ Client side, for every entry in "calls":
     AND its SPIFFE ID must equal expected_id before any byte of the request is sent;
   * protocol "postgres": libpq (psycopg2) with sslmode=verify-full + client certificate.
 
-Routes: GET /health  -> who am I, who are you, TLS version
-        GET /chain?marker=X -> this hop + the next hop's answer (down to the database)
+Then the request itself must match one of the listener's `routes` (generated from the policy):
+  * no route with that method + path -> 404; a route that is not open to this caller -> 403.
+  * a listener without routes serves nothing (default deny).
+
+Routes implemented here: GET /health, GET /chain?marker=X (this hop + the next hops, down to the
+database), GET /api/me (who the caller is: actor, role, customer). Others answer 501 until their
+stage is deployed.
 """
 import http.client
 import ipaddress
@@ -39,6 +44,20 @@ log = logging.getLogger()
 
 def spiffe_ids(peercert):
     return [v for k, v in (peercert or {}).get("subjectAltName", ()) if k == "URI"]
+
+
+def route_match(pattern, path):
+    """`*` matches exactly one path segment; everything else must be equal."""
+    p, q = pattern.strip("/").split("/"), path.strip("/").split("/")
+    return len(p) == len(q) and all(a == "*" or a == b for a, b in zip(p, q))
+
+
+def find_route(listener, method, path):
+    """The route matching method + path, or None (-> 404)."""
+    for r in listener.get("routes", []):
+        if r["method"] == method and route_match(r["path"], path):
+            return r
+    return None
 
 
 def server_context():
@@ -134,26 +153,50 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def authorize(self):
+    def authorize(self, method, path):
         ids = spiffe_ids(self.request.getpeercert())
         self.peer_id = ids[0] if len(ids) == 1 else None
+        self.actor = CONF.get("actors", {}).get(self.peer_id, {})
+        self.route = None
         src = ipaddress.ip_address(self.client_address[0])
+        code = 403
         if not any(src in ipaddress.ip_network(n) for n in self.listener["allowed_sources"]):
             reason = f"source {src} not allowed"
         elif self.peer_id not in self.listener["allowed_ids"]:
             reason = f"identity {ids} not allowed"
         else:
-            return True
+            route = find_route(self.listener, method, path)
+            if route is None:
+                code, reason = 404, f"no route {method} {path}"
+            elif self.peer_id not in route["allow_ids"]:
+                reason = f"route {route['name']} ({method} {route['path']}) not allowed for {self.peer_id}"
+            else:
+                self.route = route
+                return True
         log.info("refused %s: %s", src, reason)
-        self._send(403, {"error": "forbidden", "reason": reason})
+        self._send(code, {"error": "forbidden" if code == 403 else "not found", "reason": reason})
         return False
 
-    def do_GET(self):
-        if not self.authorize():
-            return
+    def do_POST(self):
+        self.do_GET(method="POST")
+
+    def do_PUT(self):
+        self.do_GET(method="PUT")
+
+    def do_PATCH(self):
+        self.do_GET(method="PATCH")
+
+    def do_DELETE(self):
+        self.do_GET(method="DELETE")
+
+    def do_GET(self, method="GET"):
         url = urlparse(self.path)
+        if not self.authorize(method, url.path):
+            return
         me = {"node": CONF["node"], "identity": CONF["identity"], "peer": self.peer_id,
               "tls": self.request.version()}
+        if url.path == "/api/me":
+            return self._send(200, {"identity": self.peer_id, **self.actor, "tls": self.request.version()})
         if url.path == "/health":
             return self._send(200, me)
         if url.path == "/chain":
@@ -164,7 +207,8 @@ class Handler(BaseHTTPRequestHandler):
                 log.info("downstream error: %s", e)
                 return self._send(502, dict(me, error=f"{type(e).__name__}: {e}"))
             return self._send(200, me)
-        return self._send(404, {"error": "not found"})
+        # allowed by the policy but not deployed yet on this node
+        return self._send(501, {"error": "not implemented", "route": self.route["name"]})
 
 
 class Server(ThreadingHTTPServer):

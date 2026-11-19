@@ -23,21 +23,34 @@ def mtls(node):
     return json.loads((BUILD / "nodes" / node / "mtls.json").read_text())
 
 
-def frontend_url(path):
-    """The one service the tunnel may reach, from the policy (10.20.0.10:8443)."""
+def frontend_node():
+    """The node that serves the actors (the one whose mtls.json has an actor directory)."""
     for node in PKI.get("identities", {}):
         p = BUILD / "nodes" / node / "mtls.json"
-        if p.exists():
-            for s in json.loads(p.read_text())["serves"].values():
-                if any("/client/" in i for i in s["allowed_ids"]):
-                    return f"https://{s['listen']}{path}"
-    raise LookupError("no service reachable from the tunnel in the policy")
+        if p.exists() and json.loads(p.read_text()).get("actors"):
+            return node
+    raise LookupError("no service reachable by the actors in the policy")
+
+
+def frontend_url(path):
+    """The one service the tunnel may reach, from the policy (10.20.0.10:8443)."""
+    s = next(iter(mtls(frontend_node())["serves"].values()))
+    return f"https://{s['listen']}{path}"
+
+
+def actor_identity(actor):
+    return next(i for i in PKI["identities"].values() if i.get("actor") == actor)
+
+
+def actor_creds(actor):
+    """(cert, key) of an actor; every client key is generated on the i5 (ansible/.secrets/pki)."""
+    d = ROOT / "ansible/.secrets/pki" / actor_identity(actor)["cn"]
+    return d / "client.crt", d / "client.key"
 
 
 def peer_creds():
-    p = next(p for p in WG["peers"] if p["test"])
-    d = ROOT / "ansible/.secrets/pki" / f"client-{p['name']}"
-    return d / "client.crt", d / "client.key"
+    """The test client's default identity: Dev (staff), who may use the diagnostic routes."""
+    return actor_creds("dev")
 
 
 class VMs:
@@ -57,12 +70,13 @@ def ensure_peer():
     return NS
 
 
-def probe_tunnel(url, cert=None, key=None, extra=()):
+def probe_tunnel(url, cert=None, key=None, extra=(), method="GET", data=None):
     """tls_probe.py from inside the test peer's netns (= a client coming through WireGuard)."""
     cmd = ["sudo", "-n", "ip", "netns", "exec", NS, "python3", str(TESTS / "tls_probe.py"),
            "--url", url, "--ca", str(ROOT_CA)]
     if cert:
         cmd += ["--cert", str(cert), "--key", str(key)]
+    cmd += ["--method", method] + (["--data", data] if data is not None else [])
     r = subprocess.run(cmd + list(extra), capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)

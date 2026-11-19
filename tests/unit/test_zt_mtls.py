@@ -92,13 +92,30 @@ def net(tmp_path_factory):
     ips = {"frontend": "127.0.0.10", "service-a": "127.0.0.11", "service-b": "127.0.0.12"}
     ports = {n: free_port(ip) for n, ip in ips.items()}
     addr = {n: f"{ips[n]}:{ports[n]}" for n in ips}
+    peer, i7 = f"{TD}/client/test-peer", f"{TD}/client/i7"
+
+    def routes(*specs):
+        return [{"name": n, "method": m, "path": p, "allow_ids": ids} for n, m, p, ids in specs]
+
+    inner = lambda caller: routes(("health", "GET", "/health", [caller]),  # noqa: E731
+                                  ("diag-chain", "GET", "/chain", [caller]))
     confs = {
-        "frontend": {"serves": {"https": {"allowed_ids": [f"{TD}/client/i7", f"{TD}/client/test-peer"],
-                                          "allowed_sources": ["127.0.0.0/8"]}},
-                     "calls": {"api-a": {"address": addr["service-a"], "expected_id": f"{TD}/service-a"}}},
-        "service-a": {"serves": {"api-a": {"allowed_ids": [f"{TD}/frontend"], "allowed_sources": ["127.0.0.1"]}},
+        "frontend": {"serves": {"https": {
+                         "allowed_ids": [i7, peer], "allowed_sources": ["127.0.0.0/8"],
+                         "routes": routes(("health", "GET", "/health", [peer]),
+                                          ("diag-chain", "GET", "/chain", [peer]),
+                                          ("whoami", "GET", "/api/me", [peer, i7]),
+                                          ("accounts", "GET", "/api/accounts", [i7]),   # not the peer's
+                                          ("transfer", "POST", "/api/transfers", [peer]),
+                                          ("history", "GET", "/api/accounts/*/transactions", [peer]))}},
+                     "calls": {"api-a": {"address": addr["service-a"], "expected_id": f"{TD}/service-a"}},
+                     "actors": {peer: {"actor": "peer", "role": "customer", "customer": "peer"},
+                                i7: {"actor": "i7", "role": "staff"}}},
+        "service-a": {"serves": {"api-a": {"allowed_ids": [f"{TD}/frontend"], "allowed_sources": ["127.0.0.1"],
+                                           "routes": inner(f"{TD}/frontend")}},
                       "calls": {"api-b": {"address": addr["service-b"], "expected_id": f"{TD}/service-b"}}},
-        "service-b": {"serves": {"api-b": {"allowed_ids": [f"{TD}/service-a"], "allowed_sources": ["127.0.0.1"]}},
+        "service-b": {"serves": {"api-b": {"allowed_ids": [f"{TD}/service-a"], "allowed_sources": ["127.0.0.1"],
+                                           "routes": inner(f"{TD}/service-a")}},
                       "calls": {}},
     }
     procs = []
@@ -125,6 +142,22 @@ def net(tmp_path_factory):
     for p in procs:
         p.terminate()
         p.wait(5)
+
+
+def raw(net, name, method, path, creds="peer", body=b""):
+    """One request with any method (tls_probe.py only does GET)."""
+    import http.client
+    d = net["dir"]
+    host, port = net["addr"][name].rsplit(":", 1)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(d / "root.crt")
+    ctx.load_cert_chain(d / f"{creds}.crt", d / f"{creds}.key")
+    c = http.client.HTTPSConnection(host, int(port), context=ctx, timeout=10)
+    c.request(method, path, body=body)
+    r = c.getresponse()
+    out = (r.status, json.loads(r.read() or b"null"))
+    c.close()
+    return out
 
 
 def probe(net, name, path="/health", creds=None, extra=()):
@@ -210,3 +243,60 @@ def test_next_hop_identity_is_pinned(net, tmp_path):
         p.terminate()
         p.wait(5)
     assert r["status"] == 502 and "expected spiffe://cloud.local/service-a" in r["body"]["error"]
+
+
+# ----------------------------------------------------------- per-route authorization --
+def test_whoami_returns_the_actor(net):
+    status, body = raw(net, "frontend", "GET", "/api/me")
+    assert status == 200 and body["actor"] == "peer" and body["role"] == "customer" and body["customer"] == "peer"
+    assert body["identity"] == f"{TD}/client/test-peer"
+
+
+def test_route_of_someone_else_is_403(net):
+    """test-peer is a valid caller of the frontend, but /api/accounts is open to i7 only."""
+    status, body = raw(net, "frontend", "GET", "/api/accounts")
+    assert status == 403 and "route accounts" in body["reason"]
+
+
+def test_unknown_route_is_404(net):
+    assert raw(net, "frontend", "GET", "/admin")[0] == 404
+    assert raw(net, "frontend", "DELETE", "/api/me")[0] == 404, "the method is part of the route"
+
+
+def test_wildcard_matches_one_segment_only(net):
+    assert raw(net, "frontend", "GET", "/api/accounts/A1/transactions")[0] == 501
+    assert raw(net, "frontend", "GET", "/api/accounts/A1/x/transactions")[0] == 404
+
+
+def test_allowed_but_not_deployed_is_501(net):
+    status, body = raw(net, "frontend", "POST", "/api/transfers", body=b"{}")
+    assert status == 501 and body["route"] == "transfer"
+
+
+def test_route_refusals_are_logged(net):
+    raw(net, "frontend", "GET", "/api/accounts")
+    time.sleep(0.3)
+    assert "refused 127.0.0.1: route accounts (GET /api/accounts) not allowed for" in \
+        (net["dir"] / "frontend.log").read_text()
+
+
+def test_listener_without_routes_serves_nothing(net, tmp_path):
+    d = net["dir"]
+    conf = json.loads((d / "frontend/mtls.json").read_text())
+    del conf["serves"]["https"]["routes"]
+    port = free_port("127.0.0.10")
+    conf["serves"]["https"].update(listen=f"127.0.0.10:{port}", port=port)
+    (tmp_path / "mtls.json").write_text(json.dumps(conf))
+    p = subprocess.Popen([sys.executable, str(SERVICE), str(tmp_path / "mtls.json"), str(d / "frontend")],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                socket.create_connection(("127.0.0.10", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        assert raw(dict(net, addr={"x": f"127.0.0.10:{port}"}), "x", "GET", "/health")[0] == 404
+    finally:
+        p.terminate()
+        p.wait(5)

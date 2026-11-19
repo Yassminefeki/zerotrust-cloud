@@ -19,6 +19,7 @@
   # localhost is already local.
   hosts: localhost
   gather_facts: false
+  tags: [clients]          # `make client-certs` runs only this play (refresh short-lived certs)
   vars:
     pki_secrets: "{{ zt_secrets }}/pki"
     clients: "{{ zt_pki.identities | dict2items | selectattr('value.kind', 'equalto', 'client') | list }}"
@@ -44,8 +45,8 @@
         d={{ (pki_secrets ~ '/' ~ item.key) | quote }}
         [ -s "$d/client.crt" ] || { echo issue; exit 0; }
         openssl verify -CAfile {{ (zt_build ~ '/pki/root_ca.crt') | quote }} -untrusted "$d/client.crt" "$d/client.crt" >/dev/null 2>&1 || { echo issue; exit 0; }
-        secs=$(( {{ zt_pki.renew_before | regex_replace('h$', '') | int }} * 3600 ))
-        openssl x509 -in "$d/client.crt" -noout -checkend "$secs" >/dev/null && echo ok || echo issue
+        # renew_before_s: 8h for 24h certificates, a third of a shorter lifetime (20 min for 1h)
+        openssl x509 -in "$d/client.crt" -noout -checkend {{ item.value.renew_before_s }} >/dev/null && echo ok || echo issue
       args:
         executable: /bin/bash
       register: client_state
@@ -64,7 +65,10 @@
       loop_control: {label: "{{ item.item.key }}"}
 
     - name: Sign on the CA (one-time token; only the CSR travels, never the key)
-      ansible.builtin.include_tasks: tasks/sign_client_csr.yml
+      ansible.builtin.include_tasks:
+        file: tasks/sign_client_csr.yml
+        apply: {tags: [clients]}       # included tasks do not inherit tags by themselves
+      tags: [clients]
       when: item.stdout == 'issue'
       loop: "{{ client_state.results }}"
       loop_control: {label: "{{ item.item.key }}", loop_var: item}
@@ -76,20 +80,28 @@
       loop: "{{ clients | product(['client.key', 'client.crt']) | list }}"
       loop_control: {label: "{{ item.0.key }}/{{ item.1 }}"}
 
-    - name: Export the i7 identity (cert, key, root) next to its wg0.conf
+    - name: Previous single-identity export layout is gone (one folder per actor now)
+      ansible.builtin.file:
+        path: "{{ wg_export }}/{{ item.0.name }}/{{ item.1 }}"
+        state: absent
+      loop: "{{ zt_wg.peers | rejectattr('test') | list | product(['client.crt', 'client.key', 'root_ca.crt']) | list }}"
+      loop_control: {label: "{{ item.0.name }}/{{ item.1 }}"}
+
+    - name: Export each actor's identity to its machine (build/export/<peer>/<actor>/)
       ansible.builtin.copy:
         src: "{{ item.src }}"
-        dest: "{{ wg_export }}/{{ item.peer }}/{{ item.name }}"
+        dest: "{{ wg_export }}/{{ item.peer }}/{{ item.actor }}/{{ item.name }}"
         mode: "0600"
+        directory_mode: "0700"
       loop: "{{ export_files }}"
-      loop_control: {label: "{{ item.peer }}/{{ item.name }}"}
+      loop_control: {label: "{{ item.peer }}/{{ item.actor }}/{{ item.name }}"}
       vars:
         export_files: >-
           {%- set out = [] -%}
-          {%- for p in zt_wg.peers if not p.test -%}
-          {%- set d = pki_secrets ~ '/client-' ~ p.name -%}
+          {%- for cn, i in zt_pki.identities.items() if i.kind == 'client' and i.export_to is defined -%}
+          {%- set d = pki_secrets ~ '/' ~ cn -%}
           {%- set _ = out.extend([
-               {'peer': p.name, 'name': 'client.key', 'src': d ~ '/client.key'},
-               {'peer': p.name, 'name': 'client.crt', 'src': d ~ '/client.crt'},
-               {'peer': p.name, 'name': 'root_ca.crt', 'src': zt_build ~ '/pki/root_ca.crt'}]) -%}
+               {'peer': i.export_to, 'actor': i.actor, 'name': 'client.key', 'src': d ~ '/client.key'},
+               {'peer': i.export_to, 'actor': i.actor, 'name': 'client.crt', 'src': d ~ '/client.crt'},
+               {'peer': i.export_to, 'actor': i.actor, 'name': 'root_ca.crt', 'src': zt_build ~ '/pki/root_ca.crt'}]) -%}
           {%- endfor -%}{{ out }}

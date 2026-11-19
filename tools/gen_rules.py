@@ -202,6 +202,83 @@ def validate_policy(policy: dict) -> list[str]:
     peers = policy.get("wireguard", {}).get("peers", [])
     if peers and not any(not p.get("test") for p in peers):
         errs.append("wireguard: at least one real (non-test) peer is required")
+    errs += validate_actors_and_routes(policy)
+    return errs
+
+
+METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+LIFETIME_RE = re.compile(r"^(\d+)([hm])$")
+
+
+def _hours(lifetime: str) -> float:
+    m = LIFETIME_RE.match(str(lifetime))
+    if not m:
+        raise ValueError(lifetime)
+    return int(m.group(1)) / (1 if m.group(2) == "h" else 60)
+
+
+def _callers(policy: dict, service: str) -> set[str]:
+    """Sources that reach `service` through a declared flow (principals and nodes)."""
+    return {f["from"] for f in policy.get("flows", []) if f["to"] == service}
+
+
+def validate_actors_and_routes(policy: dict) -> list[str]:
+    errs: list[str] = []
+    roles = policy.get("roles", {})
+    actors = policy.get("actors", {})
+    peers = {p["name"]: p for p in policy.get("wireguard", {}).get("peers", [])}
+    max_h = _hours(policy["cert"]["lifetime"])
+    for name, a in actors.items():
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name):
+            errs.append(f"actor {name}: name must be a lowercase DNS label")
+        if a.get("role") not in roles:
+            errs.append(f"actor {name}: unknown role {a.get('role')}")
+        if a.get("entry") not in policy["principals"]:
+            errs.append(f"actor {name}: entry must be a principal (e.g. tunnel)")
+        if (a.get("role") == "customer") != ("customer" in a):
+            errs.append(f"actor {name}: `customer` is required for, and only for, role customer")
+        if "export_to" in a and (a["export_to"] not in peers or peers[a["export_to"]].get("test")):
+            errs.append(f"actor {name}: export_to must be a real (non-test) WireGuard peer")
+        if "cert_lifetime" in a:
+            try:
+                if _hours(a["cert_lifetime"]) > max_h:
+                    errs.append(f"actor {name}: cert_lifetime above the CA maximum {policy['cert']['lifetime']}")
+            except ValueError:
+                errs.append(f"actor {name}: cert_lifetime must look like 1h or 30m")
+    routes = policy.get("routes", {})
+    for svc_name, svc in policy["services"].items():
+        if svc.get("mtls") and "db_user" not in svc and svc_name not in routes:
+            errs.append(f"routes: mTLS service {svc_name} has no routes (nothing would be reachable)")
+    for svc_name, rlist in routes.items():
+        svc = policy["services"].get(svc_name)
+        if not svc or not svc.get("mtls") or "db_user" in svc:
+            errs.append(f"routes {svc_name}: routes apply to HTTPS mTLS services only")
+            continue
+        callers = _callers(policy, svc_name)
+        seen = set()
+        for r in rlist:
+            key = (r.get("method"), r.get("path"))
+            label = f"routes {svc_name} {r.get('method')} {r.get('path')}"
+            if key in seen:
+                errs.append(f"{label}: duplicate")
+            seen.add(key)
+            if r.get("method") not in METHODS:
+                errs.append(f"{label}: method must be one of {sorted(METHODS)}")
+            if not str(r.get("path", "")).startswith("/"):
+                errs.append(f"{label}: path must start with /")
+            if not r.get("allow"):
+                errs.append(f"{label}: empty allow list")
+            for who in r.get("allow", []):
+                if who in roles:
+                    reach = [a for a, spec in actors.items()
+                             if spec.get("role") == who and spec.get("entry") in callers]
+                    if not reach:
+                        errs.append(f"{label}: no actor of role {who} reaches {svc_name} through a flow")
+                elif who in policy["nodes"]:
+                    if who not in callers:
+                        errs.append(f"{label}: node {who} has no flow to {svc_name}")
+                else:
+                    errs.append(f"{label}: allow entry {who} is neither a role nor a node")
     return errs
 
 
@@ -260,10 +337,27 @@ def _dst_endpoints(policy, svc_name):
     return out
 
 
+def actor_uri(policy, name):
+    return spiffe(policy, f"{policy['actors'][name]['role']}/{name}")
+
+
 def _identities(policy, src_name):
     if src_name in policy["nodes"]:
         return [spiffe(policy, src_name)]
-    return list(policy["principals"][src_name].get("identities", []))
+    # a principal presents the identities of the actors that enter through it
+    return [actor_uri(policy, a) for a, spec in policy.get("actors", {}).items()
+            if spec.get("entry") == src_name]
+
+
+def expand_allow(policy, who_list):
+    """Route allow entries (roles, node names) -> concrete SPIFFE IDs."""
+    out = []
+    for who in who_list:
+        if who in policy.get("roles", {}):
+            out += [actor_uri(policy, a) for a, spec in policy["actors"].items() if spec["role"] == who]
+        else:
+            out.append(spiffe(policy, who))
+    return out
 
 
 def resolve(policy: dict) -> list[Rule]:
@@ -469,8 +563,22 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
             entry.update(protocol="postgres", db_name=svc["db_name"], db_user=svc["db_user"])
         else:
             entry.setdefault("protocol", "https")
+    actors = {}
+    for name, entry in serves.items():
+        if entry.get("protocol") != "https":
+            continue
+        entry["routes"] = [{"name": r["name"], "method": r["method"], "path": r["path"],
+                            "allow_ids": [i for i in expand_allow(policy, r["allow"])
+                                          if i in entry["allowed_ids"]]}
+                           for r in policy.get("routes", {}).get(name, [])]
+        # who is who: the service maps a caller's SPIFFE ID to its actor, role and customer
+        for a, spec in policy.get("actors", {}).items():
+            uri = actor_uri(policy, a)
+            if uri in entry["allowed_ids"]:
+                actors[uri] = {"actor": a, "role": spec["role"], **({"customer": spec["customer"]}
+                                                                    if "customer" in spec else {})}
     return {"node": node, "identity": spiffe(policy, node), "min_tls": policy["cert"]["min_tls"],
-            "serves": serves, "calls": calls}
+            "serves": serves, "calls": calls, "actors": actors}
 
 
 def render_pg_hba(policy: dict, rules: list[Rule]) -> str:
@@ -569,11 +677,17 @@ def render_pki(policy: dict, rules: list[Rule]) -> dict:
         ips = [ip for net, ip in policy["nodes"][n]["interfaces"].items()
                if net not in ("mgmt", "wan", "tunnel")]
         identities[n] = {"cn": n, "uri": spiffe(policy, n), "dns": [n], "ips": ips, "kind": "node"}
-    for r in rules:
-        if r.mtls and r.src.kind == "principal":
-            for uri in r.allowed_ids:
-                cn = client_cn(uri)
-                identities[cn] = {"cn": cn, "uri": uri, "dns": [cn], "ips": [], "kind": "client"}
+    for a, spec in policy.get("actors", {}).items():
+        uri = actor_uri(policy, a)
+        if not any(r.mtls and uri in r.allowed_ids for r in rules):
+            continue   # an actor that reaches no mTLS service gets no certificate
+        cn = client_cn(uri)
+        life = spec.get("cert_lifetime", policy["cert"]["lifetime"])
+        # re-issue when less than renew_before is left, or a third of a shorter lifetime
+        renew_s = int(min(_hours(policy["cert"]["renew_before"]), _hours(life) / 3) * 3600)
+        identities[cn] = {"cn": cn, "uri": uri, "dns": [cn], "ips": [], "kind": "client",
+                          "actor": a, "role": spec["role"], "lifetime": life, "renew_before_s": renew_s,
+                          **({"export_to": spec["export_to"]} if "export_to" in spec else {})}
     all_ips = sorted({ip for i in identities.values() for ip in i["ips"]},
                      key=lambda x: ipaddress.ip_address(x))
     return {
