@@ -37,6 +37,11 @@
 - name: Install step-cli
   ansible.builtin.apt:
     deb: /var/cache/zerotrust/step-cli_amd64.deb
+  register: zt_pkg
+  # the VM's own daily apt run (unattended-upgrades) may hold the dpkg lock for a while
+  until: zt_pkg is succeeded
+  retries: 40
+  delay: 15
 
 - name: Root of trust (pinned, fetched from the CA in stage 3)
   ansible.builtin.copy:

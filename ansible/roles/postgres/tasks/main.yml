@@ -14,6 +14,12 @@
     name: postgresql
     update_cache: true
     cache_valid_time: 3600
+    lock_timeout: 600
+  register: zt_pkg
+  # the VM's own daily apt run (unattended-upgrades) may hold the dpkg lock for a while
+  until: zt_pkg is succeeded
+  retries: 40
+  delay: 15
 
 - name: Cluster config directory
   ansible.builtin.shell: ls -d /etc/postgresql/*/main | sort -V | tail -1

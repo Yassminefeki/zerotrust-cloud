@@ -10,6 +10,12 @@
     name: python3-psycopg2
     update_cache: true
     cache_valid_time: 3600
+    lock_timeout: 600
+  register: zt_pkg
+  # the VM's own daily apt run (unattended-upgrades) may hold the dpkg lock for a while
+  until: zt_pkg is succeeded
+  retries: 40
+  delay: 15
   when: zt_mtls.calls.values() | selectattr('protocol', 'equalto', 'postgres') | list | length > 0
 
 - name: Unprivileged service user, allowed to read the TLS key

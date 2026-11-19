@@ -14,8 +14,10 @@
     - pki-client
 
 - name: Client certificates for tunnel clients
+  # NO `connection: local` here: as a play keyword it would also apply to the tasks delegated
+  # to the CA VM (they would run on the i5 and ask for its sudo password). The implicit
+  # localhost is already local.
   hosts: localhost
-  connection: local
   gather_facts: false
   vars:
     pki_secrets: "{{ zt_secrets }}/pki"
