@@ -19,11 +19,12 @@ import time
 import uuid
 from pathlib import Path
 
-import jinja2
 import pytest
 import yaml
 
 from unit_helpers import ROOT
+
+jinja2 = pytest.importorskip("jinja2")
 
 pytest.importorskip("psycopg2")
 SERVICE = ROOT / "ansible/roles/app/files/zt-mtls"
