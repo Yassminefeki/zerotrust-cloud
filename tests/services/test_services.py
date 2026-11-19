@@ -106,23 +106,27 @@ def bad(tmp_path_factory, vm):
     }
 
 
-@pytest.mark.parametrize("case,expect", [
-    ("no client certificate", r"CERTIFICATE_REQUIRED|certificate required"),
-    ("certificate from another CA", r"UNKNOWN_CA|unknown ca"),
-    ("identity not in the allowlist", r"403"),
-    ("expired certificate", r"CERTIFICATE_EXPIRED|certificate expired"),
+# The client may hear a handshake refusal as the TLS alert or as EOF/reset (the server closes
+# while the request is in flight); the reason the FRONTEND logs is deterministic.
+@pytest.mark.parametrize("case,server_reason", [
+    ("no client certificate", r"tls handshake: .*PEER_DID_NOT_RETURN_A_CERTIFICATE"),
+    ("certificate from another CA", r"tls handshake: .*CERTIFICATE_VERIFY_FAILED"),
+    ("identity not in the allowlist", r"identity \['spiffe://cloud\.local/service-a'\] not allowed"),
+    ("expired certificate", r"tls handshake: .*certificate has expired"),
 ])
-def test_frontend_refuses(peer, vm, bad, case, expect):
+def test_frontend_refuses(peer, vm, bad, case, server_reason):
     fe = vm(next(n for n in APP if "client" in str(mtls(n)["serves"])))
     since = fe.check_output("date '+%Y-%m-%d %H:%M:%S'").strip()
     time.sleep(1)
     r = probe_tunnel(frontend_url("/health"), *bad[case])
     assert not r["ok"], f"{case}: the frontend accepted it: {r}"
-    verdict = f"{r['status']} {r['error']}"
-    assert re.search(expect, verdict, re.I), verdict
+    if case == "identity not in the allowlist":
+        assert r["status"] == 403 and r["tls"] == "TLSv1.3", r
+    else:
+        assert r["status"] is None and r["error"], f"{case}: no TLS refusal: {r}"
     time.sleep(1)
     log = fe.check_output(f"journalctl -u zt-mtls --since '{since}' --no-pager")
-    assert "refused 10.10.0.200" in log, f"refusal not logged: {log[-1500:]}"
+    assert re.search(r"refused 10\.10\.0\.200: " + server_reason, log), f"{case}: {log[-1500:]}"
 
 
 def test_tls12_refused(peer, tp):

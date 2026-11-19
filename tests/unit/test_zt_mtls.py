@@ -145,14 +145,21 @@ def test_chain(net):
     assert b["next"]["next"]["marker"] == "m1"
 
 
-@pytest.mark.parametrize("creds,expect", [
-    (None, "CERTIFICATE_REQUIRED"),          # no client certificate
-    ("foreign", "UNKNOWN_CA"),               # signed by another CA
-    ("expired", "CERTIFICATE_EXPIRED"),      # right CA, right ID, past validity
+# The client may hear a refusal as the TLS alert OR as EOF/reset (the server closes while the
+# client's request is in flight). What is deterministic is the reason the SERVER logs.
+@pytest.mark.parametrize("creds,server_reason", [
+    (None, "PEER_DID_NOT_RETURN_A_CERTIFICATE"),            # no client certificate
+    ("foreign", "CERTIFICATE_VERIFY_FAILED"),               # signed by another CA
+    ("expired", "certificate has expired"),                 # right CA, right ID, past validity
 ])
-def test_handshake_refusals(net, creds, expect):
+def test_handshake_refusals(net, creds, server_reason):
+    log = net["dir"] / "frontend.log"
+    before = log.read_text()
     r = probe(net, "frontend", creds=creds)
-    assert not r["ok"] and r["status"] is None and expect in (r["error"] or ""), r
+    assert not r["ok"] and r["status"] is None and r["error"], r
+    time.sleep(0.3)
+    new = log.read_text()[len(before):]
+    assert "refused 127.0.0.1: tls handshake" in new and server_reason in new, new
 
 
 def test_identity_not_in_allowlist_is_403(net):
@@ -203,9 +210,3 @@ def test_next_hop_identity_is_pinned(net, tmp_path):
         p.terminate()
         p.wait(5)
     assert r["status"] == 502 and "expected spiffe://cloud.local/service-a" in r["body"]["error"]
-
-
-def test_refusals_are_logged(net):
-    test_handshake_refusals(net, None, "CERTIFICATE_REQUIRED")
-    time.sleep(0.3)
-    assert "refused 127.0.0.1: tls handshake" in (net["dir"] / "frontend.log").read_text()
