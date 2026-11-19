@@ -25,6 +25,7 @@
   vars:
     pki_secrets: "{{ zt_secrets }}/pki"
     clients: "{{ zt_pki.identities | dict2items | selectattr('value.kind', 'equalto', 'client') | list }}"
+    exported: "{{ clients | selectattr('value.export_to', 'defined') | list }}"
   tasks:
     - name: Private directories
       ansible.builtin.file:
@@ -82,6 +83,42 @@
       loop: "{{ clients | product(['client.key', 'client.crt']) | list }}"
       loop_control: {label: "{{ item.0.key }}/{{ item.1 }}"}
 
+    # ----------------------------------------------- browsers (Firefox on the i7, stage 11) --
+    - name: Browser bundle password (random, generated on the i5 once, never committed)
+      ansible.builtin.shell: >-
+        f={{ (pki_secrets ~ '/' ~ item.key ~ '/p12.pass') | quote }};
+        [ -s "$f" ] || { umask 077 && openssl rand -hex 12 > "$f"; }
+      args:
+        creates: "{{ pki_secrets }}/{{ item.key }}/p12.pass"
+      loop: "{{ exported }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Browser bundle (PKCS#12 = key + certificate chain, AES-256), rebuilt when the certificate changes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        d={{ (pki_secrets ~ '/' ~ item.key) | quote }}
+        if [ -s "$d/client.p12" ] && [ "$d/client.p12" -nt "$d/client.crt" ] && [ "$d/client.p12" -nt "$d/p12.pass" ]; then
+          echo ok; exit 0
+        fi
+        umask 077
+        openssl pkcs12 -export -inkey "$d/client.key" -in "$d/client.crt" \
+          -name {{ ('ZT Bank - ' ~ item.value.name ~ ' (' ~ item.value.role ~ ')') | quote }} \
+          -certpbe AES-256-CBC -keypbe AES-256-CBC -macalg sha256 \
+          -passout "file:$d/p12.pass" -out "$d/client.p12.tmp"
+        mv "$d/client.p12.tmp" "$d/client.p12"
+        echo built
+      args:
+        executable: /bin/bash
+      register: p12
+      changed_when: "'built' in p12.stdout"
+      loop: "{{ exported }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Root fingerprint (shown in the import guide, to check before trusting it)
+      ansible.builtin.command: openssl x509 -in {{ zt_build }}/pki/root_ca.crt -noout -fingerprint -sha256
+      register: root_fp
+      changed_when: false
+
     - name: Previous single-identity export layout is gone (one folder per actor now)
       ansible.builtin.file:
         path: "{{ wg_export }}/{{ item.0.name }}/{{ item.1 }}"
@@ -118,5 +155,17 @@
           {%- set _ = out.extend([
                {'peer': i.export_to, 'actor': i.actor, 'name': 'client.key', 'src': d ~ '/client.key'},
                {'peer': i.export_to, 'actor': i.actor, 'name': 'client.crt', 'src': d ~ '/client.crt'},
-               {'peer': i.export_to, 'actor': i.actor, 'name': 'root_ca.crt', 'src': zt_build ~ '/pki/root_ca.crt'}]) -%}
+               {'peer': i.export_to, 'actor': i.actor, 'name': 'root_ca.crt', 'src': zt_build ~ '/pki/root_ca.crt'},
+               {'peer': i.export_to, 'actor': i.actor, 'name': i.actor ~ '.p12', 'src': d ~ '/client.p12'},
+               {'peer': i.export_to, 'actor': i.actor, 'name': 'p12-password.txt', 'src': d ~ '/p12.pass'}]) -%}
           {%- endfor -%}{{ out }}
+
+    - name: Import guide for Firefox, per actor (build/export/<peer>/<actor>/FIREFOX.txt)
+      ansible.builtin.template:
+        src: templates/firefox-import.txt.j2
+        dest: "{{ wg_export }}/{{ item.value.export_to }}/{{ item.value.actor }}/FIREFOX.txt"
+        mode: "0600"
+      loop: "{{ exported }}"
+      loop_control: {label: "{{ item.value.export_to }}/{{ item.value.actor }}"}
+      vars:
+        fingerprint: "{{ root_fp.stdout.split('=', 1)[1] }}"

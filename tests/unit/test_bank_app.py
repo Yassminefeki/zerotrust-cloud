@@ -22,44 +22,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from unit_helpers import ROOT
+from unit_helpers import PKI_SH, ROOT, TD  # noqa: F401  (TD, PKI_SH: shared with other offline tests)
 
 jinja2 = pytest.importorskip("jinja2")
 
-pytest.importorskip("psycopg2")
 SERVICE = ROOT / "ansible/roles/app/files/zt-mtls"
-TD = "spiffe://cloud.local"
 IP = {"frontend": "127.0.0.10", "service-a": "127.0.0.11", "service-b": "127.0.0.12", "database": "127.0.0.13"}
 
-PKI_SH = r"""
-set -e
-k(){ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1" 2>/dev/null; }
-cat > ext.cnf <<'EOF'
-[ca]
-basicConstraints=critical,CA:TRUE
-keyUsage=critical,keyCertSign,cRLSign
-[leaf]
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=serverAuth,clientAuth
-subjectAltName=${ENV::SAN}
-EOF
-k root.key; openssl req -x509 -new -key root.key -subj /CN=root -days 2 -out root.crt \
-  -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign
-k int.key; openssl req -new -key int.key -subj /CN=int -out int.csr
-SAN=URI:x openssl x509 -req -in int.csr -CA root.crt -CAkey root.key -days 2 -extfile ext.cnf -extensions ca -out int.crt 2>/dev/null
-leaf(){ k "$1.key"; openssl req -new -key "$1.key" -subj "/CN=$1" -out "$1.csr"
-  SAN="$2" openssl x509 -req -in "$1.csr" -CA int.crt -CAkey int.key -days 1 -extfile ext.cnf -extensions leaf -out "$1.leaf" 2>/dev/null
-  cat "$1.leaf" int.crt > "$1.crt"; }
-leaf frontend  "URI:$TD/frontend,IP:127.0.0.10"
-leaf service-a "URI:$TD/service-a,IP:127.0.0.11"
-leaf service-b "URI:$TD/service-b,IP:127.0.0.12"
-leaf database  "URI:$TD/database,IP:127.0.0.13"
-leaf alice     "URI:$TD/customer/alice,DNS:customer-alice"
-leaf bob       "URI:$TD/customer/bob,DNS:customer-bob"
-leaf dev       "URI:$TD/staff/dev,DNS:staff-dev"
-leaf bot       "URI:$TD/bot/statements,DNS:bot-statements"
-"""
 
 
 def free_port(ip):
@@ -90,6 +59,7 @@ def pg_bin(name):
 
 @pytest.fixture(scope="module")
 def bank(build, tmp_path_factory):
+    pytest.importorskip("psycopg2")    # the ledger service needs it (python3-psycopg2 on service-b)
     runas = os.environ.get("ZT_TEST_PG_RUNAS")
     if not (pg_bin("initdb") and pg_bin("pg_ctl")) or (os.geteuid() == 0 and not runas):
         pytest.skip("needs PostgreSQL binaries (and ZT_TEST_PG_RUNAS when running as root)")
@@ -141,6 +111,7 @@ ssl_min_protocol_version = 'TLSv1.3'
     assert r.returncode == 0, r.stderr
 
     # ---------------------------------------- the three services, from the generated mtls.json --
+    shutil.copytree(ROOT / "ansible/roles/app/files/www", d / "www")   # the site, as deployed on the frontend
     ports = {n: free_port(IP[n]) for n in ("frontend", "service-a", "service-b")}
     nxt = {"frontend": ("service-a", "api-a"), "service-a": ("service-b", "api-b")}
     procs = []
@@ -182,7 +153,10 @@ def call(bank, who, method, path, body=None, headers=None, to="frontend", raw=No
     ctx.load_cert_chain(d / f"{who}.crt", d / f"{who}.key")
     c = http.client.HTTPSConnection(host, port, context=ctx, timeout=20)
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
-    c.request(method, path, body=data, headers=headers or {})
+    headers = dict(headers or {})
+    if data is not None:
+        headers.setdefault("Content-Type", "application/json")
+    c.request(method, path, body=data, headers=headers)
     r = c.getresponse()
     text = r.read()
     c.close()

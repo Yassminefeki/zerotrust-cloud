@@ -76,6 +76,7 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | 8 | — | `make test-8` | tcpdump: no clear text on any bridge; TLS 1.3 everywhere; drift + full N×N |
 | 9 | `make certs services` | `make test-9` | each actor × each route: allowed, 403 (logged) or 404, exactly as the policy says |
 | 10 | `make services` | `make test-10` | ZT Bank live: own accounts only, IDOR → 404, transfers, replay-safe, RLS + append-only in the real DB, audit |
+| 11 | `make services client-certs` | `make test-11` | the website through the tunnel (strict CSP, repo files, read-only), CSRF refused + logged, Firefox bundles for the i7 |
 
 The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
 Ubuntu's SHA256SUMS) into `~/.cache/zerotrust/`; `make infra` uploads that local copy, so a
@@ -326,3 +327,40 @@ spiffe://…/frontend GET /accounts/ZTB-ALICE-01/…: 404`). Demo data: `ansible
 Offline, `tests/unit/test_bank_sql.py` and `tests/unit/test_bank_app.py` run the schema and the
 whole chain (real programs, generated routes, PostgreSQL with certificate authentication) when
 PostgreSQL is installed (`ZT_TEST_PG_DSN` / `ZT_TEST_PG_RUNAS`, see the files); otherwise skipped.
+
+## The website, and Firefox on the i7 (stage 11)
+
+| customer (alice) | staff (dev) | bot (statements) |
+|---|---|---|
+| ![](docs/screens/customer-alice.png) | ![](docs/screens/staff-dev.png) | ![](docs/screens/bot-statements.png) |
+
+One page (`ansible/roles/app/files/www/`), served by the frontend at `https://10.20.0.10:8443/`
+through the tunnel. **There is no login**: the browser presents the actor's client certificate in
+the TLS handshake and the screen follows the role in it. The page only renders what the API
+returns; every rule stays on the server side.
+
+- **No script injection.** `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'…`,
+  no inline code at all, and the JS writes text only (`textContent`, never `innerHTML`). A
+  description like `<script>alert(1)</script>` is shown as text (tested in a real browser).
+- **No cross-site request forgery.** A browser sends the client certificate to the bank whoever
+  asks it to, so a page from another site could try to make it pay. The frontend refuses any POST
+  that is not JSON (`415`: a cross-site `<form>` cannot send JSON without a CORS preflight, which
+  nothing answers) or whose `Origin` / `Sec-Fetch-Site` is not the bank itself (`403`); logged with the
+  real actor, never forwarded to core banking.
+- **Safe retries.** Each transfer carries a random idempotency key; after a network failure,
+  pressing *Send* again re-uses it, so the bank pays once.
+- Files are root-owned and read-only for the service user, on the frontend only.
+
+**Firefox on the i7.** `make client-certs` writes, for every actor with `export_to: i7`,
+`build/export/i7/<actor>/`: `<actor>.p12` (key + certificate chain, AES-256, random password
+generated on the i5 in `ansible/.secrets`, never committed), `p12-password.txt`, `root_ca.crt` and
+`FIREFOX.txt`, a step-by-step guide with the URL and the root's fingerprint to check. One Firefox
+profile per identity (`firefox -P`) to be alice in one window and dev in another. Certificates live
+24 h: run `make client-certs` again and re-send the new `.p12`.
+
+Tests: offline, `tests/unit/test_web_ui.py` drives a **real Chrome** (Playwright, when installed)
+logged in by nothing but a client certificate: each role's screen, Bob blocked from Alice's
+account, no CSP violation, and an attacker's page on another origin trying a form and a `fetch`
+POST: refused, nothing paid. `tests/unit/test_browser_bundle.py` runs the playbook's bundle task
+and imports the result with NSS's `pk12util` (Firefox's own crypto library). Live,
+`make test-11` checks the deployed site, CSRF on the real chain and the exported bundles.

@@ -59,6 +59,7 @@ def main():
         conn.request(a.method, u.path + ("?" + u.query if u.query else ""), body=body, headers=headers)
         r = conn.getresponse()
         out["status"] = r.status
+        out["headers"] = {k: v for k, v in r.getheaders()}
         raw = r.read().decode(errors="replace")
         try:
             out["body"] = json.loads(raw)

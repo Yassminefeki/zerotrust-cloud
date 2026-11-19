@@ -1,0 +1,43 @@
+ZT Bank — open the bank in Firefox as {{ item.value.name }} ({{ item.value.role }})
+==================================================================================
+
+There is no password to log in: Firefox proves who you are with your client certificate,
+during the TLS handshake. Files in this folder:
+
+  root_ca.crt        the bank's root of trust (public)
+  {{ '%-19s' | format(item.value.actor ~ '.p12') }}your key + certificate, encrypted (AES-256)
+  p12-password.txt   the password of {{ item.value.actor }}.p12 — delete it once imported
+  client.crt / .key  the same identity for curl (stage 8)
+
+Snap Firefox (Ubuntu) can only open files in your home folder, not in hidden folders:
+copy this folder to ~/Downloads/zt-{{ item.value.actor }}/ first.
+
+1. Tunnel up:            sudo wg-quick up ./wg0.conf      (the bank is only reachable through it)
+
+2. Trust the bank's root (once per Firefox profile)
+   Settings > Privacy & Security > Certificates > View Certificates... > Authorities > Import...
+   choose root_ca.crt, tick "Trust this CA to identify websites", OK.
+   Before trusting it, check its SHA-256 fingerprint (View) is exactly:
+     {{ fingerprint }}
+
+3. Import your identity
+   Same window > Your Certificates > Import... > {{ item.value.actor }}.p12 > password from p12-password.txt.
+   It appears as "ZT Bank - {{ item.value.name }} ({{ item.value.role }})".
+
+4. Open  {{ item.value.web_url }}
+   Firefox asks "User Identification Request": choose that certificate, tick "Remember this
+   decision", OK. You are in, as {{ item.value.name }}.
+
+Several identities on one machine (alice and dev): Firefox remembers ONE choice per site, so use
+one Firefox profile per identity:   firefox -P      (create "zt-alice", "zt-dev"; do steps 2-3 in each)
+
+Your certificate lives {{ item.value.lifetime }}. When it expires the bank refuses the handshake
+(Firefox: "SSL_ERROR_EXPIRED_CERT_ALERT" or "connection reset"): get the new {{ item.value.actor }}.p12 from the
+cloud admin (`make client-certs` on the i5), delete the old one in Your Certificates, import the new one.
+The root and the password stay the same.
+
+What you will see: {% if item.value.role == 'customer' %}your accounts, their history, and a transfer form (limits:
+the bank refuses above the maximum per transfer or the daily limit).{% elif item.value.role == 'staff' %}the bank's health (ledger balanced, counts, limits) — never customer data.{% else %}monthly statements per account.{% endif %}
+
+
+Identity: {{ item.value.uri }}

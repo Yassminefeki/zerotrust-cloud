@@ -394,8 +394,9 @@ def test_inner_routes_only_for_the_upstream_node(build):
 
 def test_actor_directory_on_the_frontend(build):
     actors = mtls(build, "frontend")["actors"]
-    assert actors["spiffe://cloud.local/customer/alice"] == {"actor": "alice", "role": "customer", "customer": "alice"}
-    assert actors["spiffe://cloud.local/staff/dev"] == {"actor": "dev", "role": "staff"}
+    assert actors["spiffe://cloud.local/customer/alice"] == {"actor": "alice", "role": "customer", "customer": "alice",
+                                                             "name": "Alice Martin"}
+    assert actors["spiffe://cloud.local/staff/dev"] == {"actor": "dev", "role": "staff", "name": "dev"}
     assert mtls(build, "service-a")["actors"] == {}, "inner services only know nodes"
 
 

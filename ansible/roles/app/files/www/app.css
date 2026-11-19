@@ -1,0 +1,106 @@
+/* ZT Bank — no inline styles anywhere (the Content-Security-Policy forbids them). */
+:root {
+  --ink: #14211f;
+  --muted: #5d6b68;
+  --line: #dfe6e4;
+  --bg: #f4f7f6;
+  --card: #ffffff;
+  --brand: #0f3d3e;
+  --accent: #1f7a63;
+  --accent-ink: #ffffff;
+  --credit: #17784f;
+  --debit: #a3341f;
+  --warn-bg: #fff1ee;
+  --ok-bg: #ecf8f2;
+  --radius: 12px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+* { box-sizing: border-box; }
+body { margin: 0; line-height: 1.45; }
+[hidden] { display: none !important; }
+
+.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: .8rem 1.5rem; background: var(--brand); color: #fff;
+}
+.brand { display: flex; align-items: center; gap: .6rem; }
+.brand-name { font-weight: 700; font-size: 1.15rem; letter-spacing: .02em; }
+.who { display: flex; align-items: center; gap: .8rem; }
+.who-text { display: flex; flex-direction: column; text-align: right; }
+.who-name { font-weight: 600; }
+.who-id { font-size: .75rem; opacity: .75; font-family: ui-monospace, monospace; }
+.badge {
+  font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  padding: .25rem .6rem; border-radius: 999px; background: #7fd1b9; color: var(--brand);
+}
+.badge.staff { background: #f2c66d; }
+.badge.bot { background: #c9b8ff; }
+
+main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+h1 { font-size: 1.5rem; margin: 0; }
+h2 { font-size: 1.1rem; margin: 0 0 .25rem; }
+.muted { color: var(--muted); }
+.small { font-size: .85rem; }
+.loading { color: var(--muted); }
+.row-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .5rem 0 1rem; flex-wrap: wrap; }
+.total { color: var(--muted); }
+.total strong { color: var(--ink); font-size: 1.2rem; margin-left: .3rem; }
+
+.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.account {
+  text-align: left; font: inherit; color: inherit; cursor: pointer;
+  background: var(--card); border: 2px solid var(--line); border-radius: var(--radius); padding: 1rem 1.1rem;
+}
+.account:hover { border-color: #b9cbc6; }
+.account.selected { border-color: var(--accent); }
+.account .label { font-weight: 600; display: block; }
+.account .number { font-family: ui-monospace, monospace; color: var(--muted); font-size: .85rem; display: block; }
+.account .balance { font-size: 1.5rem; font-weight: 700; margin-top: .5rem; display: block; }
+
+.grid { display: grid; grid-template-columns: 3fr 2fr; gap: 1.2rem; align-items: start; }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .who-id { display: none; } }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.1rem 1.2rem; }
+
+.table-wrap { overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; margin-top: .6rem; font-size: .92rem; }
+.table th { text-align: left; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding: .45rem .4rem; }
+.table td { border-bottom: 1px solid var(--line); padding: .5rem .4rem; vertical-align: top; }
+.table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.table .date { white-space: nowrap; color: var(--muted); }
+.table .cp { display: block; font-size: .8rem; color: var(--muted); font-family: ui-monospace, monospace; }
+.credit { color: var(--credit); }
+.debit { color: var(--debit); }
+.table tr.new td { background: var(--ok-bg); }
+
+form label { display: block; font-size: .9rem; font-weight: 600; margin-top: .8rem; }
+input, select {
+  display: block; width: 100%; margin-top: .3rem; font: inherit; padding: .55rem .65rem;
+  border: 1px solid #c4d0cd; border-radius: 8px; background: #fff; color: var(--ink);
+}
+input:focus, select:focus, button:focus-visible { outline: 3px solid #9ad8c6; outline-offset: 1px; }
+input[aria-invalid="true"] { border-color: var(--debit); }
+form.inline { display: flex; gap: .5rem; align-items: center; }
+form.inline input { margin: 0; width: auto; }
+.actions { display: flex; gap: .6rem; margin-top: 1rem; }
+button {
+  font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px;
+  padding: .6rem 1.1rem; background: var(--accent); color: var(--accent-ink);
+}
+button.secondary { background: #e5eeeb; color: var(--brand); }
+button:disabled { opacity: .6; cursor: progress; }
+
+.notice { margin-top: 1rem; padding: .7rem .9rem; border-radius: 8px; background: var(--ok-bg); }
+.notice.error { background: var(--warn-bg); color: #6d1d0f; margin: 0 0 1rem; }
+.notice .ref { display: block; font-family: ui-monospace, monospace; font-size: .8rem; color: var(--muted); margin-top: .2rem; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; }
+.stat .k { color: var(--muted); font-size: .85rem; display: block; }
+.stat .v { font-size: 1.4rem; font-weight: 700; display: block; margin-top: .2rem; }
+.stat.good .v { color: var(--credit); }
+.stat.bad .v { color: var(--debit); }
+
+.foot { max-width: 1100px; margin: 1rem auto 2rem; padding: 0 1.5rem; font-size: .9rem; }
+.foot p { margin: .3rem 0; }

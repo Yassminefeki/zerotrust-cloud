@@ -49,6 +49,16 @@
     mode: "0644"
   notify: Restart zt-mtls
 
+- name: ZT Bank website (frontend only; static files, root-owned, read-only for the service)
+  ansible.builtin.copy:
+    src: www/
+    dest: /usr/local/share/zt-bank/www/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  when: zt_mtls.serves.values() | selectattr('app', 'defined') | selectattr('app', 'equalto', 'web') | list | length > 0
+
 - name: mTLS config generated from policy.yaml
   ansible.builtin.copy:
     src: "{{ zt_build }}/nodes/{{ inventory_hostname }}/mtls.json"

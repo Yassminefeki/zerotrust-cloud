@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>ZT Bank</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="/static/logo.svg" alt="" width="32" height="32">
+      <span class="brand-name">ZT Bank</span>
+    </div>
+    <div class="who" id="who" hidden>
+      <div class="who-text">
+        <span class="who-name" id="who-name"></span>
+        <span class="who-id" id="who-id"></span>
+      </div>
+      <span class="badge" id="who-role"></span>
+    </div>
+  </header>
+
+  <main>
+    <div class="notice error" id="error" role="alert" hidden></div>
+    <p class="loading" id="loading">Checking your certificate…</p>
+
+    <!-- customer -->
+    <section id="view-customer" hidden>
+      <div class="row-head">
+        <h1>Your accounts</h1>
+        <div class="total">Total <strong id="total"></strong></div>
+      </div>
+      <div class="accounts" id="accounts"></div>
+
+      <div class="grid">
+        <section class="card" aria-labelledby="hist-title">
+          <h2 id="hist-title">History</h2>
+          <p class="muted" id="hist-sub"></p>
+          <div class="table-wrap">
+            <table class="table" id="history">
+              <thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th class="num">Balance</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="xfer-title">
+          <h2 id="xfer-title">New transfer</h2>
+          <form id="transfer" autocomplete="off" novalidate>
+            <label>From
+              <select name="from" id="xfer-from" required></select>
+            </label>
+            <label>To (account number)
+              <input name="to" id="xfer-to" placeholder="ZTB-BOB-01" required
+                     pattern="ZTB-[A-Z0-9]{2,12}-[0-9]{2}" maxlength="20" spellcheck="false">
+            </label>
+            <label>Amount (<span class="cur" id="xfer-cur">EUR</span>)
+              <input name="amount" id="xfer-amount" inputmode="decimal" placeholder="12.50" required
+                     pattern="[0-9]{1,9}([.][0-9]{1,2})?" maxlength="12">
+            </label>
+            <label>Description
+              <input name="description" id="xfer-desc" maxlength="140" placeholder="Dinner">
+            </label>
+            <p class="muted small" id="limits"></p>
+            <div class="actions">
+              <button type="submit" id="xfer-send">Send</button>
+              <button type="button" class="secondary" id="xfer-new" hidden>New transfer</button>
+            </div>
+            <div class="notice" id="xfer-result" role="status" hidden></div>
+          </form>
+        </section>
+      </div>
+    </section>
+
+    <!-- staff -->
+    <section id="view-staff" hidden>
+      <div class="row-head">
+        <h1>Operations</h1>
+        <button type="button" class="secondary" id="status-refresh">Refresh</button>
+      </div>
+      <p class="muted">Health of the bank. Staff see counts and integrity checks, never customer data.</p>
+      <div class="stats" id="stats"></div>
+    </section>
+
+    <!-- bot -->
+    <section id="view-bot" hidden>
+      <div class="row-head">
+        <h1>Monthly statements</h1>
+        <form id="month-form" class="inline">
+          <input type="month" id="month" required>
+          <button type="submit" class="secondary">Show</button>
+        </form>
+      </div>
+      <p class="muted">Totals per account. No counterparties, no descriptions.</p>
+      <div class="table-wrap">
+        <table class="table" id="statements">
+          <thead><tr><th>Account</th><th>Customer</th><th class="num">Opening</th><th class="num">Credits</th>
+                     <th class="num">Debits</th><th class="num">Closing</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p><strong>No password.</strong> Your certificate is your identity. Every request is checked again by
+      each hop: frontend → service-a → service-b → database.</p>
+    <p class="muted small" id="session"></p>
+  </footer>
+</body>
+</html>

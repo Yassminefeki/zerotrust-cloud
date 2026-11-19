@@ -78,6 +78,8 @@ def web(req, t):
     ident = {"X-ZT-Actor": req.peer_id or "", "X-ZT-Role": actor.get("role", ""),
              "X-ZT-Customer": actor.get("customer", "")}
     r = req.route
+    if req.method not in ("GET", "HEAD"):
+        same_origin_only(req)
     if r in ("web-ui", "web-assets"):
         return static(req.path)
     if r == "accounts":
@@ -101,6 +103,22 @@ def web(req, t):
     if r == "status":
         return passthrough(*t.api("GET", "/status", headers=ident))
     deny(501, f"route {r} is not part of the web app")
+
+
+def same_origin_only(req):
+    """A browser sends the client certificate to this site whoever asks it to, so a page from
+    elsewhere could try to make it POST here (cross-site request forgery). Refused, three ways:
+    a JSON body (a cross-site form cannot send one without a CORS preflight, which nothing here
+    answers), and the browser's own Origin / Sec-Fetch-Site headers when it sends them."""
+    b = getattr(req, "browser", {}) or {}
+    if b.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+        deny(415, "send JSON (Content-Type: application/json)")
+    site = b.get("Sec-Fetch-Site", "")
+    if site and site not in ("same-origin", "none"):
+        deny(403, f"cross-site request refused ({site})")
+    origin = b.get("Origin", "")
+    if origin and origin != f"https://{b.get('Host', '')}":
+        deny(403, "cross-origin request refused")
 
 
 def static(path):
@@ -269,7 +287,7 @@ def handle(app, req, tools):
     try:
         return APPS[app](req, tools)
     except Reply as r:
-        if r.status in (403, 404, 409, 422):
+        if r.status in (403, 404, 409, 415, 422):   # refusals worth auditing (415: CSRF attempt)
             # who really asked: the end user (X-ZT-Actor), and the service it came through
             user = req.headers.get("X-ZT-Actor") or req.peer_id
             via = f" via {req.peer_id}" if user != req.peer_id else ""

@@ -606,8 +606,8 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
         for a, spec in policy.get("actors", {}).items():
             uri = actor_uri(policy, a)
             if uri in entry["allowed_ids"]:
-                actors[uri] = {"actor": a, "role": spec["role"], **({"customer": spec["customer"]}
-                                                                    if "customer" in spec else {})}
+                actors[uri] = {"actor": a, "role": spec["role"], "name": spec.get("full_name", a),
+                               **({"customer": spec["customer"]} if "customer" in spec else {})}
     for name, entry in serves.items():
         if "app" in policy["services"][name]:
             entry["app"] = policy["services"][name]["app"]
@@ -715,6 +715,10 @@ def render_pki(policy: dict, rules: list[Rule]) -> dict:
         ips = [ip for net, ip in policy["nodes"][n]["interfaces"].items()
                if net not in ("mgmt", "wan", "tunnel")]
         identities[n] = {"cn": n, "uri": spiffe(policy, n), "dns": [n], "ips": ips, "kind": "node"}
+    # the address of the bank's website, as an actor's browser reaches it (through the tunnel)
+    web = next(({"ip": policy["nodes"][v["node"]]["interfaces"][v["network"]], "port": v["port"]}
+                for v in policy["services"].values() if v.get("app") == "web"), None)
+    web_url = f"https://{web['ip']}:{web['port']}/" if web else None
     for a, spec in policy.get("actors", {}).items():
         uri = actor_uri(policy, a)
         if not any(r.mtls and uri in r.allowed_ids for r in rules):
@@ -724,7 +728,8 @@ def render_pki(policy: dict, rules: list[Rule]) -> dict:
         # re-issue when less than renew_before is left, or a third of a shorter lifetime
         renew_s = int(min(_hours(policy["cert"]["renew_before"]), _hours(life) / 3) * 3600)
         identities[cn] = {"cn": cn, "uri": uri, "dns": [cn], "ips": [], "kind": "client",
-                          "actor": a, "role": spec["role"], "lifetime": life, "renew_before_s": renew_s,
+                          "actor": a, "role": spec["role"], "name": spec.get("full_name", a),
+                          "lifetime": life, "renew_before_s": renew_s, "web_url": web_url,
                           **({"export_to": spec["export_to"]} if "export_to" in spec else {})}
     all_ips = sorted({ip for i in identities.values() for ip in i["ips"]},
                      key=lambda x: ipaddress.ip_address(x))

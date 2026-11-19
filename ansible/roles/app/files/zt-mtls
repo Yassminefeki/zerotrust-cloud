@@ -56,6 +56,9 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Strict-Transport-Security": "max-age=31536000",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
 }
 
 
@@ -189,6 +192,8 @@ class Request:
         # canonical names (X-ZT-Actor, X-ZT-Role, X-ZT-Customer), whatever case the sender used
         self.headers = {"-".join("ZT" if w.lower() == "zt" else w.capitalize() for w in k.split("-")): v
                         for k, v in handler.headers.items() if k.lower().startswith("x-zt-")}
+        # what a browser says about where a request comes from (cross-site request forgery checks)
+        self.browser = {k: handler.headers.get(k, "") for k in ("Content-Type", "Origin", "Host", "Sec-Fetch-Site")}
         self.raw = raw
         self.peer_id, self.actor, self.route = handler.peer_id, handler.actor, handler.route["name"]
 
