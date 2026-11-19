@@ -78,9 +78,11 @@ principals:
 # --- Services (what listens where) ---------------------------------------------
 services:
   wireguard: {node: gateway,   network: wan,  port: 51820, proto: udp}
-  https:     {node: frontend,  network: dmz,  port: 8443,  proto: tcp, mtls: true}
-  api-a:     {node: service-a, network: app,  port: 9443,  proto: tcp, mtls: true}
-  api-b:     {node: service-b, network: app,  port: 9443,  proto: tcp, mtls: true}
+  # app: which part of ZT Bank the service runs (web = the site + API the actors use,
+  # core = business rules, ledger = the only one that talks to the database)
+  https:     {node: frontend,  network: dmz,  port: 8443,  proto: tcp, mtls: true, app: web}
+  api-a:     {node: service-a, network: app,  port: 9443,  proto: tcp, mtls: true, app: core}
+  api-b:     {node: service-b, network: app,  port: 9443,  proto: tcp, mtls: true, app: ledger}
   postgres:  {node: database,  network: data, port: 5432,  proto: tcp, mtls: true, db_user: service_b, db_name: appdb}
   step-ca:   {node: ca,        network: mgmt, port: 9000,  proto: tcp}
   # stateless_replies: the server may answer from its port even when conntrack has no state for
@@ -112,10 +114,16 @@ roles:
   staff:    {description: "support engineer: system health only, never customer data"}
   bot:      {description: "automated statements job: read-only, short-lived certificate"}
 actors:
-  alice:      {role: customer, customer: alice, entry: tunnel, export_to: i7}
-  bob:        {role: customer, customer: bob,   entry: tunnel}   # the second customer (tests act as Bob)
+  alice:      {role: customer, customer: alice, full_name: Alice Martin, entry: tunnel, export_to: i7}
+  bob:        {role: customer, customer: bob,   full_name: Bob Durand,   entry: tunnel}   # tests act as Bob
   dev:        {role: staff,                     entry: tunnel, export_to: i7}
   statements: {role: bot,                       entry: tunnel, cert_lifetime: 1h}
+
+# --- ZT Bank business limits (enforced by core banking AND by the database itself) --------
+bank:
+  currency: EUR
+  max_transfer: "5000.00"       # per transfer
+  daily_limit: "2000.00"        # per customer and day, transfers to other customers' accounts
 
 # --- Routes: WHAT each caller may do, per service (application layer, default deny) ---------
 # `allow` lists roles (for the actors) or node names (for service-to-service calls). A request

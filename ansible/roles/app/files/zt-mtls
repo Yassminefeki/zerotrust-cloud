@@ -24,6 +24,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import os
 import socket
 import ssl
 import sys
@@ -40,6 +41,22 @@ assert CONF.get("min_tls") == "1.3", "this service only implements TLS 1.3"
 
 logging.basicConfig(level=logging.INFO, format="zt-mtls %(message)s", stream=sys.stdout)
 log = logging.getLogger()
+
+# The bank application (zt_bank.py) lives next to this program, or in /usr/local/lib/zt.
+sys.path[1:1] = [os.path.dirname(os.path.realpath(__file__)), "/usr/local/lib/zt"]
+try:
+    import zt_bank
+except ImportError:          # transport/identity only (no `app` on any listener)
+    zt_bank = None
+MAX_BODY = 8192
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                               "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Strict-Transport-Security": "max-age=31536000",
+}
 
 
 def spiffe_ids(peercert):
@@ -97,6 +114,88 @@ def call_https(name, path):
         conn.close()
 
 
+def upstream_https():
+    return next((n for n, c in CONF["calls"].items() if c.get("protocol", "https") == "https"), None)
+
+
+def call_api(method, path, body=None, headers=None):
+    """The next hop of the bank, with the same pinning as call_https. -> (status, json)."""
+    name = upstream_https()
+    if name is None:
+        raise RuntimeError("this node calls no HTTPS service")
+    spec = CONF["calls"][name]
+    host, port = spec["address"].rsplit(":", 1)
+    conn = http.client.HTTPSConnection(host, int(port), context=client_context(), timeout=15)
+    try:
+        conn.connect()
+        ids = spiffe_ids(conn.sock.getpeercert())
+        if ids != [spec["expected_id"]]:
+            raise PermissionError(f"{spec['address']} presented {ids}, expected {spec['expected_id']}")
+        data = json.dumps(body).encode() if body is not None else None
+        h = dict(headers or {})
+        if data is not None:
+            h["Content-Type"] = "application/json"
+        conn.request(method, path, body=data, headers=h)
+        r = conn.getresponse()
+        raw = r.read()
+        try:
+            return r.status, json.loads(raw or b"{}")
+        except ValueError:
+            return 502, {"error": f"{name} answered non-JSON"}
+    finally:
+        conn.close()
+
+
+def db_connect():
+    import psycopg2   # only the node that calls the database needs it
+    name = next(n for n, c in CONF["calls"].items() if c.get("protocol") == "postgres")
+    spec = CONF["calls"][name]
+    host, port = spec["address"].rsplit(":", 1)
+    return psycopg2.connect(host=host, port=int(port), dbname=spec["db_name"], user=spec["db_user"],
+                            sslmode="verify-full", sslrootcert=ROOT, sslcert=CERT, sslkey=KEY,
+                            ssl_min_protocol_version="TLSv1.3", connect_timeout=5)
+
+
+def db_query(customer, sql, args=(), write=False):
+    """One transaction. `customer` is set as zt.customer for THIS transaction only: the row-level
+    security of the database then returns that customer's rows and nothing else."""
+    import psycopg2
+    conn = db_connect()
+    try:
+        with conn, conn.cursor() as cur:
+            if customer is not None:
+                cur.execute("SELECT set_config('zt.customer', %s, true)", (customer,))
+            cur.execute(sql, args)
+            return cur.fetchall()
+    except psycopg2.Error as e:
+        raise zt_bank.pg_error_to_reply(e)
+    finally:
+        conn.close()
+
+
+class Tools:
+    """What the bank application may use: the next hop, the database, the log, the limits."""
+    api = staticmethod(call_api)
+    db = staticmethod(db_query)
+    log = staticmethod(lambda msg: log.info("%s", msg))
+    bank = CONF.get("bank", {})
+
+
+class Request:
+    def __init__(self, handler, method, url, raw):
+        self.method, self.path = method, url.path
+        self.query = {k: v[0] for k, v in parse_qs(url.query).items()}
+        # only the identity headers set by the upstream node are ever read by the app
+        # canonical names (X-ZT-Actor, X-ZT-Role, X-ZT-Customer), whatever case the sender used
+        self.headers = {"-".join("ZT" if w.lower() == "zt" else w.capitalize() for w in k.split("-")): v
+                        for k, v in handler.headers.items() if k.lower().startswith("x-zt-")}
+        self.raw = raw
+        self.peer_id, self.actor, self.route = handler.peer_id, handler.actor, handler.route["name"]
+
+    def json(self):
+        return zt_bank.parse_json(self.raw)
+
+
 def call_postgres(name, marker):
     import psycopg2   # only the node that calls the database needs it
     spec = CONF["calls"][name]
@@ -107,11 +206,11 @@ def call_postgres(name, marker):
     try:
         with conn.cursor() as cur:
             cur.execute("""SELECT current_user, %s::text,
-                                  (SELECT count(*) FROM items),
+                                  (bank.status()->>'ledger_balanced')::boolean,
                                   s.version, s.client_dn
                            FROM pg_stat_ssl s WHERE s.pid = pg_backend_pid()""", (marker,))
-            user, echo, items, version, client_dn = cur.fetchone()
-        return {"node": "database", "db_user": user, "marker": echo, "items": items,
+            user, echo, balanced, version, client_dn = cur.fetchone()
+        return {"node": "database", "db_user": user, "marker": echo, "ledger_balanced": balanced,
                 "tls": version, "client_dn": client_dn}
     finally:
         conn.close()
@@ -145,13 +244,29 @@ class Handler(BaseHTTPRequestHandler):
         log.info("%s %s %s", self.client_address[0], self.peer_id, fmt % args)
 
     def _send(self, code, obj):
-        body = (json.dumps(obj) + "\n").encode()
+        if isinstance(obj, tuple) and obj and obj[0] == "raw":
+            _, ctype, body = obj
+            cache = "no-cache"
+        else:
+            ctype, body, cache = "application/json", (json.dumps(obj) + "\n").encode(), "no-store"
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache)
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+    def _body(self):
+        n = self.headers.get("Content-Length")
+        if not n:
+            return b""
+        if not n.isdigit() or int(n) > MAX_BODY:
+            self._send(413, {"error": f"body above {MAX_BODY} bytes"})
+            return None
+        return self.rfile.read(int(n))
 
     def authorize(self, method, path):
         ids = spiffe_ids(self.request.getpeercert())
@@ -193,13 +308,24 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if not self.authorize(method, url.path):
             return
+        raw = self._body()
+        if raw is None:
+            return
         me = {"node": CONF["node"], "identity": CONF["identity"], "peer": self.peer_id,
               "tls": self.request.version()}
-        if url.path == "/api/me":
+        name = self.route["name"]
+        if name == "whoami":
             return self._send(200, {"identity": self.peer_id, **self.actor, "tls": self.request.version()})
-        if url.path == "/health":
+        if name == "health":
             return self._send(200, me)
-        if url.path == "/chain":
+        if name != "diag-chain" and self.listener.get("app") and zt_bank:
+            try:
+                status, body = zt_bank.handle(self.listener["app"], Request(self, method, url, raw), Tools)
+            except Exception as e:     # never leak a traceback to the caller
+                log.exception("app error on %s %s: %s", method, url.path, e)
+                status, body = 500, {"error": "internal error"}
+            return self._send(status, body)
+        if name == "diag-chain":
             marker = parse_qs(url.query).get("marker", [""])[0]
             try:
                 me.update(marker=marker, next=next_hop(marker))

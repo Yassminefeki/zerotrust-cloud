@@ -1,0 +1,280 @@
+-- ZT Bank — database schema, managed by Ansible (role postgres). Idempotent: applied on every run.
+-- Generated values come from policy.yaml (limits, customers) and files/seed.yaml (demo data).
+--
+-- Security model, inside the database itself:
+--   * tables belong to bank_owner (NOLOGIN); the application role {{ db_user }} can only
+--       - SELECT customers/accounts/entries/transfers, filtered by ROW LEVEL SECURITY to the
+--         customer named in the transaction setting zt.customer (no setting -> no rows);
+--       - EXECUTE bank.transfer() / bank.statements() / bank.status() (SECURITY DEFINER).
+--     It has no INSERT/UPDATE/DELETE anywhere: money only moves through bank.transfer(), which
+--     enforces ownership, positive amounts, funds, daily limit and idempotency.
+--   * the ledger is append-only: a trigger refuses UPDATE/DELETE on transfers, entries, audit.
+--   * double entry: every transfer writes one debit and one credit; the sum of all entries is 0.
+\set ON_ERROR_STOP on
+BEGIN;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bank_owner') THEN
+    CREATE ROLE bank_owner NOLOGIN;
+  END IF;
+END $$;
+DROP TABLE IF EXISTS public.items;                     -- stage 7 placeholder, replaced by the bank
+CREATE SCHEMA IF NOT EXISTS bank AUTHORIZATION bank_owner;
+SET LOCAL ROLE bank_owner;
+
+-- ---------------------------------------------------------------------------- tables --
+CREATE TABLE IF NOT EXISTS bank.settings (
+  key   text PRIMARY KEY,
+  value text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bank.customers (
+  id        text PRIMARY KEY CHECK (id ~ '^[a-z][a-z0-9-]{0,30}$'),
+  full_name text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bank.accounts (
+  id          text PRIMARY KEY CHECK (id ~ '^ZTB-[A-Z0-9]{2,12}-[0-9]{2}$'),
+  customer_id text REFERENCES bank.customers(id),          -- NULL = the bank's own account
+  label       text NOT NULL,
+  currency    char(3) NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bank.transfers (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id     text,                                    -- who asked (NULL = the bank)
+  idempotency_key text,
+  from_account    text NOT NULL REFERENCES bank.accounts(id),
+  to_account      text NOT NULL REFERENCES bank.accounts(id),
+  amount_cents    bigint NOT NULL CHECK (amount_cents > 0),
+  description     text NOT NULL DEFAULT '' CHECK (length(description) <= 140),
+  initiated_by    text NOT NULL,                           -- SPIFFE ID from the certificate
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  CHECK (from_account <> to_account),
+  UNIQUE (customer_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS bank.entries (
+  id           bigserial PRIMARY KEY,
+  transfer_id  uuid NOT NULL REFERENCES bank.transfers(id),
+  account_id   text NOT NULL REFERENCES bank.accounts(id),
+  amount_cents bigint NOT NULL CHECK (amount_cents <> 0),  -- + credit, - debit
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS entries_by_account ON bank.entries (account_id, id);
+CREATE INDEX IF NOT EXISTS transfers_by_customer_day ON bank.transfers (customer_id, created_at);
+CREATE TABLE IF NOT EXISTS bank.audit (
+  id     bigserial PRIMARY KEY,
+  at     timestamptz NOT NULL DEFAULT now(),
+  actor  text NOT NULL,
+  action text NOT NULL,
+  detail jsonb NOT NULL DEFAULT '{}'
+);
+
+-- ------------------------------------------------------------------- append-only ledger --
+CREATE OR REPLACE FUNCTION bank.forbid_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'bank.% is append-only', TG_TABLE_NAME USING ERRCODE = 'ZT405';
+END $$;
+DO $$ DECLARE t text; BEGIN
+  FOREACH t IN ARRAY ARRAY['transfers', 'entries', 'audit'] LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS append_only ON bank.%I', t);
+    EXECUTE format('CREATE TRIGGER append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON bank.%I
+                    FOR EACH STATEMENT EXECUTE FUNCTION bank.forbid_change()', t);
+  END LOOP;
+END $$;
+
+-- ------------------------------------------------------------------ row level security --
+-- current_setting(..., true) is NULL when unset: then no row matches.
+ALTER TABLE bank.customers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank.accounts  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank.entries   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank.transfers ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS own ON bank.customers;
+CREATE POLICY own ON bank.customers FOR SELECT
+  USING (id = current_setting('zt.customer', true));
+DROP POLICY IF EXISTS own ON bank.accounts;
+CREATE POLICY own ON bank.accounts FOR SELECT
+  USING (customer_id = current_setting('zt.customer', true));
+DROP POLICY IF EXISTS own ON bank.entries;
+CREATE POLICY own ON bank.entries FOR SELECT                -- the subquery is itself filtered
+  USING (account_id IN (SELECT id FROM bank.accounts));
+DROP POLICY IF EXISTS own ON bank.transfers;
+CREATE POLICY own ON bank.transfers FOR SELECT
+  USING (from_account IN (SELECT id FROM bank.accounts) OR to_account IN (SELECT id FROM bank.accounts));
+
+-- ---------------------------------------------------------------------- bank.transfer --
+-- The ONLY way money moves. Errors use SQLSTATE ZTxxx (xxx = the HTTP status the API returns).
+CREATE OR REPLACE FUNCTION bank.transfer(
+    p_customer text, p_actor text, p_key text,
+    p_from text, p_to text, p_amount_cents bigint, p_description text)
+RETURNS TABLE (transfer_id uuid, replayed boolean, balance_cents bigint)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = bank, pg_temp AS $$
+DECLARE
+  v_prev   bank.transfers;
+  v_owner  text;
+  v_to_own text;
+  v_bal    bigint;
+  v_today  bigint;
+  v_limit  bigint := (SELECT value::bigint FROM bank.settings WHERE key = 'daily_limit_cents');
+  v_max    bigint := (SELECT value::bigint FROM bank.settings WHERE key = 'max_transfer_cents');
+  v_id     uuid;
+BEGIN
+  IF coalesce(p_customer, '') !~ '^[a-z][a-z0-9-]{0,30}$' THEN
+    RAISE EXCEPTION 'a customer is required' USING ERRCODE = 'ZT400'; END IF;
+  IF coalesce(p_actor, '') !~ '^spiffe://' THEN
+    RAISE EXCEPTION 'the initiating identity is required' USING ERRCODE = 'ZT400'; END IF;
+  IF coalesce(p_key, '') !~ '^[A-Za-z0-9-]{8,64}$' THEN
+    RAISE EXCEPTION 'idempotency key: 8-64 letters, digits or dashes' USING ERRCODE = 'ZT400'; END IF;
+  IF p_amount_cents IS NULL OR p_amount_cents <= 0 THEN
+    RAISE EXCEPTION 'the amount must be positive' USING ERRCODE = 'ZT400'; END IF;
+  IF p_amount_cents > v_max THEN
+    RAISE EXCEPTION 'above the maximum per transfer' USING ERRCODE = 'ZT422'; END IF;
+  IF length(coalesce(p_description, '')) > 140 THEN
+    RAISE EXCEPTION 'description longer than 140 characters' USING ERRCODE = 'ZT400'; END IF;
+  IF p_from = p_to THEN
+    RAISE EXCEPTION 'source and destination are the same account' USING ERRCODE = 'ZT400'; END IF;
+
+  -- Same key again: return the first result, never move the money twice.
+  SELECT * INTO v_prev FROM bank.transfers t WHERE t.customer_id = p_customer AND t.idempotency_key = p_key;
+  IF FOUND THEN
+    IF v_prev.from_account = p_from AND v_prev.to_account = p_to AND v_prev.amount_cents = p_amount_cents THEN
+      RETURN QUERY SELECT v_prev.id, true,
+        (SELECT coalesce(sum(e.amount_cents), 0)::bigint FROM bank.entries e WHERE e.account_id = p_from);
+      RETURN;
+    END IF;
+    RAISE EXCEPTION 'idempotency key already used for another transfer' USING ERRCODE = 'ZT409';
+  END IF;
+
+  -- Lock the source account: concurrent transfers from it are serialized (no double spend).
+  SELECT a.customer_id INTO v_owner FROM bank.accounts a WHERE a.id = p_from FOR UPDATE;
+  IF NOT FOUND OR v_owner IS DISTINCT FROM p_customer THEN
+    -- someone else's account is reported exactly like a missing one (no account enumeration)
+    RAISE EXCEPTION 'unknown source account' USING ERRCODE = 'ZT404'; END IF;
+  SELECT a.customer_id INTO v_to_own FROM bank.accounts a WHERE a.id = p_to;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'unknown destination account' USING ERRCODE = 'ZT404'; END IF;
+
+  SELECT coalesce(sum(e.amount_cents), 0) INTO v_bal FROM bank.entries e WHERE e.account_id = p_from;
+  IF v_bal < p_amount_cents THEN
+    RAISE EXCEPTION 'insufficient funds' USING ERRCODE = 'ZT422'; END IF;
+
+  -- Daily limit: money leaving the customer (moves between their own accounts are free).
+  IF v_to_own IS DISTINCT FROM p_customer THEN
+    SELECT coalesce(sum(t.amount_cents), 0) INTO v_today
+      FROM bank.transfers t JOIN bank.accounts d ON d.id = t.to_account
+     WHERE t.customer_id = p_customer AND t.created_at >= date_trunc('day', now())
+       AND d.customer_id IS DISTINCT FROM p_customer;
+    IF v_today + p_amount_cents > v_limit THEN
+      RAISE EXCEPTION 'daily limit exceeded' USING ERRCODE = 'ZT422'; END IF;
+  END IF;
+
+  INSERT INTO bank.transfers (customer_id, idempotency_key, from_account, to_account, amount_cents,
+                              description, initiated_by)
+       VALUES (p_customer, p_key, p_from, p_to, p_amount_cents, coalesce(p_description, ''), p_actor)
+    RETURNING id INTO v_id;
+  INSERT INTO bank.entries (transfer_id, account_id, amount_cents)
+       VALUES (v_id, p_from, -p_amount_cents), (v_id, p_to, p_amount_cents);
+  INSERT INTO bank.audit (actor, action, detail)
+       VALUES (p_actor, 'transfer', jsonb_build_object('transfer', v_id, 'customer', p_customer,
+               'from', p_from, 'to', p_to, 'amount_cents', p_amount_cents));
+  RETURN QUERY SELECT v_id, false, v_bal - p_amount_cents;
+END $$;
+
+-- -------------------------------------------------------------------- bank.statements --
+-- Monthly statement lines for every customer account: totals only, no counterparties.
+CREATE OR REPLACE FUNCTION bank.statements(p_month text)
+RETURNS TABLE (account_id text, customer_id text, currency char(3),
+               opening_cents bigint, credits_cents bigint, debits_cents bigint, closing_cents bigint)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = bank, pg_temp AS $$
+DECLARE v_start timestamptz; v_end timestamptz;
+BEGIN
+  IF coalesce(p_month, '') !~ '^[0-9]{4}-(0[1-9]|1[0-2])$' THEN
+    RAISE EXCEPTION 'month must look like 2026-11' USING ERRCODE = 'ZT400'; END IF;
+  v_start := (p_month || '-01')::date;
+  v_end := v_start + interval '1 month';
+  RETURN QUERY
+    SELECT a.id, a.customer_id, a.currency,
+           coalesce(sum(e.amount_cents) FILTER (WHERE e.created_at < v_start), 0)::bigint,
+           coalesce(sum(e.amount_cents) FILTER (WHERE e.created_at >= v_start AND e.created_at < v_end
+                                                AND e.amount_cents > 0), 0)::bigint,
+           coalesce(-sum(e.amount_cents) FILTER (WHERE e.created_at >= v_start AND e.created_at < v_end
+                                                 AND e.amount_cents < 0), 0)::bigint,
+           coalesce(sum(e.amount_cents) FILTER (WHERE e.created_at < v_end), 0)::bigint
+      FROM bank.accounts a LEFT JOIN bank.entries e ON e.account_id = a.id
+     WHERE a.customer_id IS NOT NULL
+     GROUP BY a.id ORDER BY a.id;
+END $$;
+
+-- ------------------------------------------------------------------------ bank.status --
+-- System health for support staff: counts and integrity only, never customer data.
+CREATE OR REPLACE FUNCTION bank.status()
+RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path = bank, pg_temp AS $$
+  SELECT jsonb_build_object(
+    'customers', (SELECT count(*) FROM bank.customers),
+    'accounts', (SELECT count(*) FROM bank.accounts WHERE customer_id IS NOT NULL),
+    'transfers_total', (SELECT count(*) FROM bank.transfers),
+    'transfers_today', (SELECT count(*) FROM bank.transfers WHERE created_at >= date_trunc('day', now())),
+    'ledger_balanced', (SELECT coalesce(sum(amount_cents), 0) = 0 FROM bank.entries),
+    'unbalanced_transfers', (SELECT count(*) FROM (SELECT transfer_id FROM bank.entries
+                                                   GROUP BY transfer_id HAVING sum(amount_cents) <> 0) x),
+    'database', current_database(),
+    'server_version', current_setting('server_version'))
+$$;
+
+-- ------------------------------------------------------- settings from policy.yaml (bank:) --
+INSERT INTO bank.settings VALUES
+  ('currency', '{{ bank.currency }}'),
+  ('max_transfer_cents', '{{ bank.max_transfer_cents }}'),
+  ('daily_limit_cents', '{{ bank.daily_limit_cents }}')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+-- ------------------------------------------------------------- customers and demo data --
+INSERT INTO bank.accounts (id, customer_id, label, currency)
+     VALUES ('ZTB-BANK-00', NULL, 'ZT Bank - external world', '{{ bank.currency }}')
+ON CONFLICT (id) DO NOTHING;
+{% for c in bank.customers %}
+{% set code = (c.id | upper | replace('-', ''))[:12] %}
+{% set s = seed.get(c.id, {'accounts': [{'suffix': '01', 'label': 'Current account', 'opening': '0.00'}], 'history': []}) %}
+INSERT INTO bank.customers (id, full_name) VALUES ('{{ c.id }}', '{{ c.full_name | replace("'", "''") }}')
+ON CONFLICT (id) DO UPDATE SET full_name = EXCLUDED.full_name;
+{% for a in s.accounts %}
+DO $$ DECLARE v uuid; BEGIN
+  IF NOT EXISTS (SELECT 1 FROM bank.accounts WHERE id = 'ZTB-{{ code }}-{{ a.suffix }}') THEN
+    INSERT INTO bank.accounts (id, customer_id, label, currency, created_at)
+         VALUES ('ZTB-{{ code }}-{{ a.suffix }}', '{{ c.id }}', '{{ a.label | replace("'", "''") }}',
+                 '{{ bank.currency }}', now() - interval '60 days');
+{% if (a.opening | float) > 0 %}
+    INSERT INTO bank.transfers (from_account, to_account, amount_cents, description, initiated_by, created_at)
+         VALUES ('ZTB-BANK-00', 'ZTB-{{ code }}-{{ a.suffix }}', {{ ((a.opening | float) * 100) | round | int }},
+                 'Opening deposit', 'seed', now() - interval '60 days') RETURNING id INTO v;
+    INSERT INTO bank.entries (transfer_id, account_id, amount_cents, created_at) VALUES
+      (v, 'ZTB-BANK-00', -{{ ((a.opening | float) * 100) | round | int }}, now() - interval '60 days'),
+      (v, 'ZTB-{{ code }}-{{ a.suffix }}', {{ ((a.opening | float) * 100) | round | int }}, now() - interval '60 days');
+{% endif %}
+{% for h in s.history if h.account == a.suffix %}
+{% set amt = ((h.amount | float) * 100) | round | int %}
+{% set src = 'ZTB-BANK-00' if amt > 0 else 'ZTB-' ~ code ~ '-' ~ a.suffix %}
+{% set dst = 'ZTB-' ~ code ~ '-' ~ a.suffix if amt > 0 else 'ZTB-BANK-00' %}
+    INSERT INTO bank.transfers (customer_id, from_account, to_account, amount_cents, description, initiated_by, created_at)
+         VALUES ({{ "NULL" if amt > 0 else "'" ~ c.id ~ "'" }}, '{{ src }}', '{{ dst }}', {{ amt | abs }},
+                 '{{ h.description | replace("'", "''") }}', 'seed', now() - interval '{{ h.days_ago }} days')
+      RETURNING id INTO v;
+    INSERT INTO bank.entries (transfer_id, account_id, amount_cents, created_at) VALUES
+      (v, '{{ src }}', -{{ amt | abs }}, now() - interval '{{ h.days_ago }} days'),
+      (v, '{{ dst }}', {{ amt | abs }}, now() - interval '{{ h.days_ago }} days');
+{% endfor %}
+  END IF;
+END $$;
+{% endfor %}
+{% endfor %}
+
+-- ------------------------------------------------------------- what the application may do --
+RESET ROLE;
+REVOKE ALL ON SCHEMA bank FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA bank FROM PUBLIC, {{ db_user }};
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bank FROM PUBLIC, {{ db_user }};
+GRANT USAGE ON SCHEMA bank TO {{ db_user }};
+GRANT SELECT ON bank.customers, bank.accounts, bank.entries, bank.transfers TO {{ db_user }};
+GRANT EXECUTE ON FUNCTION bank.transfer(text, text, text, text, text, bigint, text),
+                          bank.statements(text), bank.status() TO {{ db_user }};
+COMMIT;

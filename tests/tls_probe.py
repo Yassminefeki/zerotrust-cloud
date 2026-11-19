@@ -27,6 +27,7 @@ def main():
     ap.add_argument("--timeout", type=float, default=10)
     ap.add_argument("--method", default="GET")
     ap.add_argument("--data", help="request body (JSON text)")
+    ap.add_argument("--header", action="append", default=[], help="extra request header 'Name: value'")
     a = ap.parse_args()
     u = urlparse(a.url)
     out = {"ok": False, "stage": "connect", "status": None, "tls": None, "server_ids": [],
@@ -52,6 +53,9 @@ def main():
         out["stage"] = "response"
         body = a.data.encode() if a.data is not None else None
         headers = {"Content-Type": "application/json"} if body is not None else {}
+        for h in a.header:
+            k, _, v = h.partition(":")
+            headers[k.strip()] = v.strip()
         conn.request(a.method, u.path + ("?" + u.query if u.query else ""), body=body, headers=headers)
         r = conn.getresponse()
         out["status"] = r.status

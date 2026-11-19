@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -139,11 +139,16 @@ test-9: venv gen client-certs  ## stage 9: every actor x every route through the
 	sudo -v
 	$(PYTEST) tests/actors -v
 
+# --------------------------------------------------------------- stage 10 --
+test-10: venv gen client-certs  ## stage 10: ZT Bank live: accounts, IDOR, transfers, RLS, audit, roles
+	sudo -v
+	$(PYTEST) tests/bank -v
+
 # ----------------------------------------------------------------- pipeline --
 up: host infra ca firewall wireguard certs services  ## build everything, in the safe order
 	@echo ">> up: done. Next: make test"
 
-test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9  ## run every test, stage by stage
+test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9 test-10  ## run every test, stage by stage
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
 	# -refresh=false: nothing needs reading back before deletion, and the provider fails the

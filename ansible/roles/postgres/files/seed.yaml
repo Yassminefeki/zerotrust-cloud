@@ -1,0 +1,20 @@
+# Demo data for ZT Bank (applied once per account, by the postgres role).
+# Every customer actor of policy.yaml should appear here; amounts > 0 are credits from the
+# outside world (the bank's own account), amounts < 0 are payments to it.
+alice:
+  accounts:
+    - {suffix: "01", label: Current account, opening: "2500.00"}
+    - {suffix: "02", label: Savings account, opening: "10000.00"}
+  history:
+    - {account: "01", days_ago: 24, amount: "2100.00", description: "Salary - ACME Robotics"}
+    - {account: "01", days_ago: 21, amount: "-850.00",  description: "Rent - November"}
+    - {account: "01", days_ago: 12, amount: "-64.90",   description: "Electricity - Elec&Co"}
+    - {account: "01", days_ago: 5,  amount: "-118.35",  description: "Groceries - FreshMarket"}
+    - {account: "02", days_ago: 30, amount: "25.00",    description: "Savings interest"}
+bob:
+  accounts:
+    - {suffix: "01", label: Current account, opening: "800.00"}
+  history:
+    - {account: "01", days_ago: 18, amount: "1450.00",  description: "Salary - Durand Studio"}
+    - {account: "01", days_ago: 9,  amount: "-39.99",   description: "Phone - TeleNet"}
+    - {account: "01", days_ago: 2,  amount: "-22.50",   description: "Cinema"}

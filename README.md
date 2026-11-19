@@ -75,6 +75,7 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | 7 | `make services` | `make test-7` | client → frontend → A → B → DB works; no cert / other CA / unlisted ID / expired refused |
 | 8 | — | `make test-8` | tcpdump: no clear text on any bridge; TLS 1.3 everywhere; drift + full N×N |
 | 9 | `make certs services` | `make test-9` | each actor × each route: allowed, 403 (logged) or 404, exactly as the policy says |
+| 10 | `make services` | `make test-10` | ZT Bank live: own accounts only, IDOR → 404, transfers, replay-safe, RLS + append-only in the real DB, audit |
 
 The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
 Ubuntu's SHA256SUMS) into `~/.cache/zerotrust/`; `make infra` uploads that local copy, so a
@@ -285,3 +286,43 @@ their certificates, not the network, decide what they can do.
 
 Client certificates are re-issued by `make client-certs` (also run before tests 6–9) when less
 than 8 h are left — or a third of a shorter lifetime (20 min for the bot's 1 h certificate).
+
+## ZT Bank — the application (stage 10)
+
+```
+actor (certificate) ─► frontend: web ─► service-a: core ─► service-b: ledger ─► PostgreSQL
+                       identity from      validation,        the only DB client;   RLS, append-only,
+                       the cert only      roles, limits      reads under RLS       bank.transfer()
+```
+
+| API (frontend) | Who | What |
+|---|---|---|
+| `GET /api/me` | everyone | who am I (actor, role, customer) |
+| `GET /api/accounts` | customers | own accounts, balances, total |
+| `GET /api/accounts/<id>/transactions` | customers | history with running balance; someone else's account = **404**, like a missing one |
+| `POST /api/transfers` | customers | `{"from","to","amount":"12.50","description","idempotency_key"}`; same key again = same transfer, paid once |
+| `GET /api/statements?month=2026-11` | bot | opening / credits / debits / closing per account, no counterparties |
+| `GET /api/status` | staff | counts, ledger integrity, limits — never customer data |
+
+**Who is who.** The frontend takes the acting identity, role and customer **only from the client
+certificate**; identity headers sent by a client are ignored (tested). Inner services receive the
+identity in `X-ZT-*` headers, which they accept only because nothing but their upstream node can
+reach them (firewall + mTLS + routes), and they re-check the role anyway.
+
+**Inside the database** (`ansible/roles/postgres/templates/bank.sql.j2`):
+- tables owned by `bank_owner` (no login); the application role can only `SELECT` — under
+  **row-level security** keyed on the transaction setting `zt.customer` (unset → no rows) — and
+  call three functions. It has no `INSERT`/`UPDATE`/`DELETE` anywhere.
+- money moves only through `bank.transfer()`: ownership of the source account, positive amount,
+  maximum per transfer and **daily limit** (from `policy.yaml`), sufficient funds under a **row
+  lock** (no double spend: tested with concurrent transfers, and the test fails if the lock is
+  removed), **idempotency key** (a retry never pays twice), **double entry** (one debit + one
+  credit), and an **audit** row carrying the actor's SPIFFE ID.
+- the ledger is **append-only**: a trigger refuses `UPDATE`/`DELETE`/`TRUNCATE`, even for the DBA.
+
+Every refusal is logged at each layer with the **real actor** (`denied spiffe://…/customer/bob via
+spiffe://…/frontend GET /accounts/ZTB-ALICE-01/…: 404`). Demo data: `ansible/roles/postgres/files/seed.yaml`.
+
+Offline, `tests/unit/test_bank_sql.py` and `tests/unit/test_bank_app.py` run the schema and the
+whole chain (real programs, generated routes, PostgreSQL with certificate authentication) when
+PostgreSQL is installed (`ZT_TEST_PG_DSN` / `ZT_TEST_PG_RUNAS`, see the files); otherwise skipped.

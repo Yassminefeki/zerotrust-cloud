@@ -85,7 +85,7 @@ def test_chain_end_to_end(chain):
     assert hops[1]["peer"] == "spiffe://cloud.local/frontend"
     assert hops[2]["peer"] == "spiffe://cloud.local/service-a"
     db = hops[3]
-    assert db["db_user"] == "service_b" and db["items"] == 3 and db["marker"] == "stage7-check"
+    assert db["db_user"] == "service_b" and db["ledger_balanced"] is True and db["marker"] == "stage7-check"
     assert re.search(r"CN\s*=\s*service-b", db["client_dn"]), db["client_dn"]
     for x in hops:
         assert x["tls"] == "TLSv1.3", x

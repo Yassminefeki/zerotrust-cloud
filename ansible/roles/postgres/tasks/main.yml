@@ -97,24 +97,42 @@
   register: pg_init
   changed_when: "'changed' in pg_init.stdout"
 
-- name: Schema and least-privilege grants (read-only table)
+- name: Database access is explicit (no PUBLIC rights)
   ansible.builtin.command:
-    argv:
-      - psql
-      - -v
-      - ON_ERROR_STOP=1
-      - -d
-      - "{{ zt_pg.db_name }}"
-      - -c
-      - |
-        REVOKE ALL ON DATABASE {{ zt_pg.db_name }} FROM PUBLIC;
-        REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-        GRANT CONNECT ON DATABASE {{ zt_pg.db_name }} TO {{ zt_pg.db_user }};
-        GRANT USAGE ON SCHEMA public TO {{ zt_pg.db_user }};
-        CREATE TABLE IF NOT EXISTS items (id serial PRIMARY KEY, label text NOT NULL);
-        INSERT INTO items (label) SELECT x FROM unnest(ARRAY['alpha','beta','gamma']) x
-          WHERE NOT EXISTS (SELECT 1 FROM items);
-        GRANT SELECT ON items TO {{ zt_pg.db_user }};
+    argv: [psql, -v, ON_ERROR_STOP=1, -d, "{{ zt_pg.db_name }}", -c,
+           "REVOKE ALL ON DATABASE {{ zt_pg.db_name }} FROM PUBLIC;
+            REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+            GRANT CONNECT ON DATABASE {{ zt_pg.db_name }} TO {{ zt_pg.db_user }};"]
   become: true
   become_user: postgres
   changed_when: false
+
+- name: ZT Bank schema, rendered from policy.yaml (limits, customers) and the demo data
+  ansible.builtin.template:
+    src: bank.sql.j2
+    dest: /etc/zt/bank.sql
+    owner: root
+    group: postgres
+    mode: "0640"
+  vars:
+    bank: "{{ lookup('ansible.builtin.file', zt_build ~ '/bank/bank.json') | from_json }}"
+    seed: "{{ lookup('ansible.builtin.file', role_path ~ '/files/seed.yaml') | from_yaml }}"
+    db_user: "{{ zt_pg.db_user }}"
+
+- name: Apply it (idempotent; append-only ledger, row-level security, bank.transfer())
+  ansible.builtin.command:
+    argv: [psql, -v, ON_ERROR_STOP=1, -q, -d, "{{ zt_pg.db_name }}", -f, /etc/zt/bank.sql]
+  environment:
+    PGOPTIONS: "-c client_min_messages=warning"
+  become: true
+  become_user: postgres
+  changed_when: false
+
+- name: The ledger is balanced (sum of all entries is zero)
+  ansible.builtin.command:
+    argv: [psql, -tA, -d, "{{ zt_pg.db_name }}", -c, "SELECT bank.status()->>'ledger_balanced'"]
+  become: true
+  become_user: postgres
+  register: zt_balanced
+  changed_when: false
+  failed_when: zt_balanced.stdout | trim != 'true'

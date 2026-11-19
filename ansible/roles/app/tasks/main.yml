@@ -36,6 +36,19 @@
     mode: "0755"
   notify: Restart zt-mtls
 
+- name: ZT Bank application module
+  ansible.builtin.file:
+    path: /usr/local/lib/zt
+    state: directory
+    mode: "0755"
+
+- name: ZT Bank application (web on the frontend, core on service-a, ledger on service-b)
+  ansible.builtin.copy:
+    src: zt_bank.py
+    dest: /usr/local/lib/zt/zt_bank.py
+    mode: "0644"
+  notify: Restart zt-mtls
+
 - name: mTLS config generated from policy.yaml
   ansible.builtin.copy:
     src: "{{ zt_build }}/nodes/{{ inventory_hostname }}/mtls.json"

@@ -207,6 +207,24 @@ def validate_policy(policy: dict) -> list[str]:
 
 
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+APPS = {"web", "core", "ledger"}
+AMOUNT_RE = re.compile(r"\d{1,9}(\.\d{1,2})?")
+
+
+def cents(amount: str) -> int:
+    """\"12.3\" -> 1230. Exact (no float)."""
+    whole, _, frac = str(amount).partition(".")
+    return int(whole) * 100 + int((frac + "00")[:2])
+
+
+def render_bank(policy: dict) -> dict:
+    """Business limits + customers, for the services and the database seed."""
+    b = policy.get("bank", {})
+    return {"currency": b.get("currency", "EUR"),
+            "max_transfer_cents": cents(b.get("max_transfer", "0")),
+            "daily_limit_cents": cents(b.get("daily_limit", "0")),
+            "customers": [{"id": a["customer"], "full_name": a["full_name"]}
+                          for a in policy.get("actors", {}).values() if a.get("role") == "customer"]}
 LIFETIME_RE = re.compile(r"^(\d+)([hm])$")
 
 
@@ -245,6 +263,19 @@ def validate_actors_and_routes(policy: dict) -> list[str]:
                     errs.append(f"actor {name}: cert_lifetime above the CA maximum {policy['cert']['lifetime']}")
             except ValueError:
                 errs.append(f"actor {name}: cert_lifetime must look like 1h or 30m")
+    for name, a in actors.items():
+        if a.get("role") == "customer" and not str(a.get("full_name", "")).strip():
+            errs.append(f"actor {name}: customers need a full_name (shown in the bank)")
+    for svc_name, svc in policy["services"].items():
+        if "app" in svc and svc["app"] not in APPS:
+            errs.append(f"service {svc_name}: app must be one of {sorted(APPS)}")
+    bank = policy.get("bank")
+    if bank is not None:
+        if not re.fullmatch(r"[A-Z]{3}", str(bank.get("currency", ""))):
+            errs.append("bank: currency must be a 3-letter ISO code")
+        for k in ("max_transfer", "daily_limit"):
+            if not AMOUNT_RE.fullmatch(str(bank.get(k, ""))):
+                errs.append(f"bank: {k} must be an amount like \"2000.00\"")
     routes = policy.get("routes", {})
     for svc_name, svc in policy["services"].items():
         if svc.get("mtls") and "db_user" not in svc and svc_name not in routes:
@@ -577,8 +608,15 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
             if uri in entry["allowed_ids"]:
                 actors[uri] = {"actor": a, "role": spec["role"], **({"customer": spec["customer"]}
                                                                     if "customer" in spec else {})}
-    return {"node": node, "identity": spiffe(policy, node), "min_tls": policy["cert"]["min_tls"],
-            "serves": serves, "calls": calls, "actors": actors}
+    for name, entry in serves.items():
+        if "app" in policy["services"][name]:
+            entry["app"] = policy["services"][name]["app"]
+    out = {"node": node, "identity": spiffe(policy, node), "min_tls": policy["cert"]["min_tls"],
+           "serves": serves, "calls": calls, "actors": actors}
+    if any("app" in e for e in serves.values()):
+        bank = render_bank(policy)
+        out["bank"] = {k: bank[k] for k in ("currency", "max_transfer_cents", "daily_limit_cents")}
+    return out
 
 
 def render_pg_hba(policy: dict, rules: list[Rule]) -> str:
@@ -861,6 +899,7 @@ def generate(policy: dict, env: dict, out: Path) -> dict[str, str]:
     files["inventory.yml"] = GENERATED_HEADER + yaml.safe_dump(render_inventory(policy, env), sort_keys=False)
     files["ssh_config"] = render_ssh_config(policy, env)
     files["pki/pki.json"] = json.dumps(render_pki(policy, rules), indent=2) + "\n"
+    files["bank/bank.json"] = json.dumps(render_bank(policy), indent=2) + "\n"
     files["matrix.json"] = json.dumps(render_matrix(policy, rules), indent=2) + "\n"
     files["flows.json"] = json.dumps([asdict(r) for r in rules], indent=2) + "\n"
     for rel, text in files.items():

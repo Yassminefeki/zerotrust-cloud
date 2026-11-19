@@ -18,6 +18,8 @@ ap.add_argument("--ca")
 ap.add_argument("--cert")
 ap.add_argument("--key")
 ap.add_argument("--sslmode", default="verify-full")
+ap.add_argument("--customer", help="set zt.customer for the transaction (row-level security)")
+ap.add_argument("--sql", help="run this statement instead of the login check; rows or SQLSTATE returned")
 a = ap.parse_args()
 kw = dict(host=a.host, port=a.port, dbname=a.db, user=a.user, sslmode=a.sslmode, connect_timeout=5)
 if a.sslmode != "disable":
@@ -27,11 +29,17 @@ if a.sslmode != "disable":
 out = {"ok": False, "user": None, "tls": None, "error": None}
 try:
     conn = psycopg2.connect(**kw)
-    with conn.cursor() as cur:
+    with conn, conn.cursor() as cur:
         cur.execute("SELECT current_user, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
         out["user"], out["tls"] = cur.fetchone()
+        if a.customer:
+            cur.execute("SELECT set_config('zt.customer', %s, true)", (a.customer,))
+        if a.sql:
+            cur.execute(a.sql)
+            out["rows"] = [list(map(str, r)) for r in cur.fetchall()] if cur.description else []
     conn.close()
     out["ok"] = True
 except Exception as e:  # noqa: BLE001
     out["error"] = f"{type(e).__name__}: {e}".strip()
+    out["sqlstate"] = getattr(e, "pgcode", None)
 print(json.dumps(out))
