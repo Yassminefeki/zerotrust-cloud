@@ -9,11 +9,12 @@
     zt_pg: "{{ (lookup('ansible.builtin.file', zt_build ~ '/nodes/' ~ inventory_hostname ~ '/mtls.json')
                | from_json).serves.values() | selectattr('protocol', 'equalto', 'postgres') | first }}"
 
+- name: Package lists are fresh
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/apt_update.yml"
+
 - name: PostgreSQL (through the apt cache on the i5)
   ansible.builtin.apt:
     name: postgresql
-    update_cache: true
-    cache_valid_time: 3600
     lock_timeout: 600
   register: zt_pkg
   # the VM's own daily apt run (unattended-upgrades) may hold the dpkg lock for a while

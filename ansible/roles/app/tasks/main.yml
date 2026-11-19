@@ -5,11 +5,13 @@
   ansible.builtin.set_fact:
     zt_mtls: "{{ lookup('ansible.builtin.file', zt_build ~ '/nodes/' ~ inventory_hostname ~ '/mtls.json') | from_json }}"
 
+- name: Package lists are fresh
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/apt_update.yml"
+  when: zt_mtls.calls.values() | selectattr('protocol', 'equalto', 'postgres') | list | length > 0
+
 - name: psycopg2 where the service calls the database (through the apt cache on the i5)
   ansible.builtin.apt:
     name: python3-psycopg2
-    update_cache: true
-    cache_valid_time: 3600
     lock_timeout: 600
   register: zt_pkg
   # the VM's own daily apt run (unattended-upgrades) may hold the dpkg lock for a while

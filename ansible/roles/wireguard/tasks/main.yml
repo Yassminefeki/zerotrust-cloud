@@ -3,11 +3,17 @@
 #   input   wan0 udp/51820            (wg-ingress)
 #   forward wg0 -> dmz0 frontend:8443 (client-frontend)
 # so everything a tunnel client tries beyond that is dropped and logged by the gateway.
+- name: Package lists are fresh
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/apt_update.yml"
+
 - name: wireguard-tools (through the apt cache on the i5)
   ansible.builtin.apt:
     name: wireguard-tools
-    update_cache: true
-    cache_valid_time: 3600
+    lock_timeout: 600
+  register: zt_pkg
+  until: zt_pkg is succeeded
+  retries: 40
+  delay: 15
 
 - name: WireGuard kernel module is available
   ansible.builtin.command: modprobe wireguard
