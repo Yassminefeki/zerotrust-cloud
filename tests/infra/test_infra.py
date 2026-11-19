@@ -117,7 +117,7 @@ def test_ssh_over_mgmt_and_cloud_init_done(vm, name):
 
 
 @pytest.mark.parametrize("name", NODES)
-def test_interfaces_names_and_ips_exact(vm, tf, name):
+def test_interfaces_names_and_ips_exact(vm, tf, policy, name):
     h = vm(name)
     got = {}
     for l in json.loads(h.check_output("ip -j -4 addr")):
@@ -125,6 +125,12 @@ def test_interfaces_names_and_ips_exact(vm, tf, name):
             continue
         got[l["ifname"]] = sorted(f'{a["local"]}/{a["prefixlen"]}' for a in l.get("addr_info", []))
     want = {i["iface"]: [f'{i["ip"]}/{i["prefix"]}'] for i in tf["nodes"][name]["interfaces"]}
+    # The WireGuard interface is not a libvirt NIC: it appears in stage 5, on the policy's
+    # tunnel node only, with the policy's tunnel address (checked here once it exists).
+    tun = policy["networks"].get("tunnel", {})
+    if "tunnel" in policy["nodes"][name]["interfaces"] and tun.get("iface") in got:
+        prefix = tun["cidr"].split("/")[1]
+        want[tun["iface"]] = [f'{policy["nodes"][name]["interfaces"]["tunnel"]}/{prefix}']
     assert got == want
 
 
