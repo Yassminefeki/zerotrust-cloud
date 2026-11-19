@@ -65,7 +65,8 @@ def test_postgres_on_data_plane_only(vm, node):
     got = sorted(l.split()[3] for l in h.check_output("ss -Hltn").splitlines() if l.split()[3].endswith(f":{pg['port']}"))
     assert got == [pg["listen"]]
     hba = h.check_output("cat $(ls -d /etc/postgresql/*/main | tail -1)/pg_hba.conf")
-    assert hba == (BUILD / "nodes" / node / "pg_hba.conf").read_text()
+    # check_output() strips the final newline; the content must otherwise be identical
+    assert hba == (BUILD / "nodes" / node / "pg_hba.conf").read_text().rstrip("\n")
 
 
 # ----------------------------------------------------------- end to end --

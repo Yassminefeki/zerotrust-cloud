@@ -78,7 +78,7 @@ def test_mtls_allowlists_are_the_policy(vm, node):
 @pytest.mark.parametrize("f", ["pg_hba.conf", "pg_ident.conf"])
 def test_database_access_is_the_policy(vm, node, f):
     live = vm(node).check_output(f"cat $(ls -d /etc/postgresql/*/main | tail -1)/{f}")
-    assert live + "\n" == (BUILD / "nodes" / node / f).read_text() or live == (BUILD / "nodes" / node / f).read_text()
+    assert live == (BUILD / "nodes" / node / f).read_text().rstrip("\n")   # check_output strips it
 
 
 def test_wireguard_peers_are_the_policy(vm):
