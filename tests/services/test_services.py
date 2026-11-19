@@ -1,7 +1,7 @@
 """Stage 7 — the services, end to end. Run with `make test-7` (on the i5, asks for sudo once).
 
 The client is the WireGuard test peer (netns zt-peer on the i5) with its own certificate
-(spiffe://cloud.local/client/test-peer), exactly like the i7 would be.
+as an actor of policy.yaml (Dev, staff: the diagnostic routes), exactly like the i7 would.
 """
 import re
 import time
@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from ztlib import BUILD
-from ztlive import (PKI, ROOT_CA, VMs, ca_issued_cert, ensure_peer, expired_cert, frontend_url,
+from ztlive import (PKI, ROOT_CA, VMs, ca_issued_cert, ensure_peer, expired_cert, frontend_node, frontend_url,
                     mtls, other_ca_cert, probe_tunnel, push, run_script, peer_creds)
 
 pytestmark = pytest.mark.services
@@ -118,7 +118,7 @@ def bad(tmp_path_factory, vm):
     ("expired certificate", r"tls handshake: .*certificate has expired"),
 ])
 def test_frontend_refuses(peer, vm, bad, case, server_reason):
-    fe = vm(next(n for n in APP if "client" in str(mtls(n)["serves"])))
+    fe = vm(frontend_node())
     since = fe.check_output("date '+%Y-%m-%d %H:%M:%S'").strip()
     time.sleep(1)
     r = probe_tunnel(frontend_url("/health"), *bad[case])
@@ -207,7 +207,7 @@ def test_db_refuses_other_role_with_valid_cert(pg_client):
 
 # ---------------------------------------------- renewal reaches the service --
 def test_renewed_certificate_is_served(vm, peer, tp):
-    fe_name = next(n for n in APP if "client" in str(mtls(n)["serves"]))
+    fe_name = frontend_node()
     fe = vm(fe_name)
     serial = lambda r: int(r["server_serial"], 16)  # noqa: E731
     before = serial(probe_tunnel(frontend_url("/health"), *tp))
