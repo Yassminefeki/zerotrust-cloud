@@ -1,0 +1,109 @@
+# Stage 13 — revoke a certificate NOW (stolen laptop, compromised VM).
+#   make revoke ACTOR=alice [REASON="stolen laptop"]     an actor's current certificate
+#   make revoke NODE=frontend [REASON="compromised"]     a VM's current workload certificate
+#
+# 1. the serial of the CURRENT certificate (cloud host for an actor, the VM for a node);
+# 2. revoked on the CA with a one-time revocation token (provisioner password never leaves the CA);
+#    the CA regenerates its CRL at once;
+# 3. every mTLS service fetches the CRL now (instead of within the minute): refused from now on;
+# 4. an actor's revoked key + certificate are moved aside (ansible/.secrets/pki/<cn>/revoked/<serial>/)
+#    so `make client-certs` issues a NEW key and certificate; a VM re-enrols with `make certs`.
+- name: Revoke on the CA
+  hosts: localhost
+  gather_facts: false
+  vars:
+    pki_secrets: "{{ zt_secrets }}/pki"
+    reason: "{{ (revoke_reason | default('')) or 'key compromise' }}"
+    actor_cn: >-
+      {{ (zt_pki.identities | dict2items | selectattr('value.actor', 'defined')
+          | selectattr('value.actor', 'equalto', revoke_actor | default('')) | map(attribute='key') | list
+          + ['']) | first }}
+  tasks:
+    - name: Exactly one target
+      ansible.builtin.assert:
+        that:
+          - (revoke_actor | default('') | length > 0) != (revoke_node | default('') | length > 0)
+          - revoke_actor is not defined or revoke_actor == '' or actor_cn | length > 0
+          - revoke_node is not defined or revoke_node == '' or revoke_node in zt_pki.identities
+        fail_msg: "usage: make revoke ACTOR=<actor in policy.yaml>  or  make revoke NODE=<VM with a certificate>"
+
+    - name: Serial of the actor's current certificate
+      ansible.builtin.command: openssl x509 -in {{ pki_secrets }}/{{ actor_cn }}/client.crt -noout -serial
+      register: actor_serial
+      changed_when: false
+      when: actor_cn | length > 0
+
+    - name: Serial of the VM's current certificate
+      ansible.builtin.command: openssl x509 -in /etc/zt/pki/cert.crt -noout -serial
+      register: node_serial
+      changed_when: false
+      delegate_to: "{{ (revoke_node | default('')) or 'localhost' }}"   # resolved even when skipped
+      become: true
+      when: revoke_node | default('') | length > 0
+
+    - name: Serial (hex as printed, decimal for step)
+      ansible.builtin.set_fact:
+        serial_hex: "{{ ((actor_serial if actor_cn | length > 0 else node_serial).stdout.split('='))[1] | trim }}"
+
+    - name: Serial (decimal)
+      ansible.builtin.set_fact:
+        serial_dec: "{{ serial_hex | int(base=16) }}"
+
+    - name: One-time revocation token, minted on the CA
+      ansible.builtin.shell: >-
+        sudo -u {{ step_user }} env STEPPATH={{ step_path }} $(command -v step || command -v step-cli)
+        ca token --revoke --provisioner {{ zt_pki.ca.provisioner | quote }}
+        --provisioner-password-file {{ step_path }}/secrets/provisioner-password
+        --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt {{ serial_dec }}
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ zt_pki.ca.node }}"
+      become: true
+      register: revoke_token
+      changed_when: false
+      no_log: true
+
+    - name: "Revoke serial {{ serial_hex }} ({{ reason }})"
+      ansible.builtin.shell: >-
+        $(command -v step || command -v step-cli) ca revoke --token "$ZT_TOKEN" --reasonCode 1
+        --reason {{ reason | quote }} --ca-url {{ zt_pki.ca.url }} --root {{ step_path }}/certs/root_ca.crt
+        {{ serial_dec }}
+      args:
+        executable: /bin/bash
+      environment:
+        ZT_TOKEN: "{{ revoke_token.stdout | trim }}"
+      delegate_to: "{{ zt_pki.ca.node }}"
+      become: true
+      register: revoked
+      changed_when: "'has been revoked' in revoked.stdout + revoked.stderr"
+      failed_when: >-
+        revoked.rc != 0 and 'already revoked' not in (revoked.stdout + revoked.stderr)
+
+    - name: The actor's revoked key and certificate set aside (the next client-certs issues new ones)
+      ansible.builtin.shell: |
+        set -e
+        d={{ (pki_secrets ~ '/' ~ actor_cn) | quote }}; dst="$d/revoked/{{ serial_hex }}"
+        umask 077; mkdir -p "$dst"
+        for f in client.crt client.key client.csr client.p12; do [ -e "$d/$f" ] && mv "$d/$f" "$dst/"; done
+        echo moved
+      args:
+        executable: /bin/bash
+      when: actor_cn | length > 0
+      changed_when: true
+
+- name: Every mTLS service enforces it now
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Fetch the new CRL now (the timer would within a minute)
+      ansible.builtin.systemd_service:
+        name: zt-crl.service
+        state: started
+      changed_when: false
+
+    - name: The revoked serial is in the published list
+      ansible.builtin.command: python3 -c 'import json; print(" ".join(json.load(open("/etc/zt/pki/revoked.json"))["revoked"]))'
+      register: published
+      changed_when: false
+      failed_when: (hostvars['localhost'].serial_hex | upper).lstrip('0') not in published.stdout.split()

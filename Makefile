@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 revoke test-13 attacks attack attack-list audit demo up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -174,11 +174,45 @@ test-12: venv gen client-certs  ## stage 12: bot (netns, device, rate limits), p
 	sudo -v
 	$(PYTEST) tests/edge -v
 
+# --------------------------------------------------------------- stage 13 --
+ACTOR  ?=
+NODE   ?=
+REASON ?=
+revoke: venv gen  ## stage 13: revoke a certificate now: make revoke ACTOR=alice | NODE=frontend [REASON="..."]
+	$(ANSIBLE) ansible-playbook revoke.yml -e revoke_actor='$(ACTOR)' -e revoke_node='$(NODE)' \
+	  -e revoke_reason='$(REASON)'
+	@if [ -n "$(ACTOR)" ]; then echo ">> $(ACTOR): old key set aside; 'make client-certs' issues a new key + certificate"; fi
+	@if [ -n "$(NODE)" ]; then echo ">> $(NODE): refused by its peers until 'make certs' re-enrols it with a new key"; fi
+
+A      ?=
+SINCE  ?= 24 hours ago
+test-13: venv gen client-certs  ## stage 13: live attacks A1 (revocation), A2 (compromised frontend), A5 (port scans)
+	sudo -v
+	$(PYTEST) tests/attacks -v
+
+attacks: venv gen client-certs  ## stage 13: the whole attack catalogue A1-A11, report in build/reports/attacks.md
+	sudo -v
+	$(PY) tools/zt-attack.py
+
+attack: venv gen client-certs  ## stage 13: some attacks of the catalogue: make attack A=1  /  A=1,5
+	@[ -n "$(A)" ] || { echo "usage: make attack A=<n>[,<n>]  (make attack-list)"; exit 2; }
+	sudo -v
+	$(PY) tools/zt-attack.py --only '$(A)'
+
+attack-list: venv  ## stage 13: the attack catalogue (what, who, which defence)
+	$(PY) tools/zt-attack.py --list
+
+audit: venv gen  ## stage 13: security audit (journals, drops, CRL, certificates, DB) in build/reports/audit.md
+	$(PY) tools/zt-audit.py --since '$(SINCE)'
+
+demo: venv gen client-certs  ## stage 13: narrated demo, with the remote client (DEMO_FAST=1, DEMO_REVOKE=0)
+	tools/zt-demo.sh
+
 # ----------------------------------------------------------------- pipeline --
 up: host infra ca firewall wireguard certs services bot  ## build everything, in the safe order
 	@echo ">> up: done. Next: make test"
 
-test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9 test-10 test-11 test-12  ## run every test, stage by stage
+test: test-0 test-1 test-2 test-3 test-4 test-5 test-6 test-7 test-8 test-9 test-10 test-11 test-12 test-13  ## run every test, stage by stage
 
 destroy: gen  ## tear down VMs, volumes, networks (host prep from stage 1 is kept)
 	# -refresh=false: nothing needs reading back before deletion, and the provider fails the

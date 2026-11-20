@@ -90,6 +90,41 @@
     mode: "0644"
   notify: Restart zt-mtls
 
+# ------------------------------------------------------- revocation (stage 13) --
+- name: CRL fetcher (signature, issuer and CRL number checked before publishing)
+  ansible.builtin.copy:
+    src: zt-crl
+    dest: /usr/local/sbin/zt-crl
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: CRL fetcher service and timer (every minute)
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: [zt-crl.service, zt-crl.timer]
+
+- name: Revocation list fetched now (zt-mtls refuses everyone without a fresh one)
+  ansible.builtin.systemd_service:
+    name: zt-crl.service
+    state: started
+    daemon_reload: true
+  changed_when: false
+
+- name: Revocation list present and fresh
+  ansible.builtin.command: >-
+    python3 -c 'import json,time,sys; d=json.load(open("/etc/zt/pki/revoked.json"));
+    sys.exit(0 if d["next_update"] > time.time() else 1)'
+  changed_when: false
+
+- name: CRL timer enabled
+  ansible.builtin.systemd_service:
+    name: zt-crl.timer
+    enabled: true
+    state: started
+
 - name: Hardened systemd unit
   ansible.builtin.template:
     src: zt-mtls.service.j2

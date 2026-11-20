@@ -60,6 +60,10 @@
     import json,sys; c=json.load(sys.stdin); s=c["extensions"]["subject_alt_name"]
     ok = (s.get("uniform_resource_identifiers")==[sys.argv[1]] and c["subject"]["common_name"]==[sys.argv[2]])
     print("ok" if ok else "other-identity")' {{ zt_ident.uri | quote }} {{ zt_ident.cn | quote }} | grep -qx ok || { echo other-identity; exit 0; }
+    # revoked (stage 13, `make revoke NODE=...`): re-enrol with a new key; renewal is refused by the CA
+    SERIAL=$(openssl x509 -in {{ zt_cert }} -noout -serial | cut -d= -f2)
+    [ -s /etc/zt/pki/revoked.json ] && python3 -c 'import json,sys; d=json.load(open("/etc/zt/pki/revoked.json"))
+    sys.exit(0 if int(sys.argv[1], 16) in {int(x, 16) for x in d["revoked"]} else 1)' "$SERIAL" && { echo revoked; exit 0; }
     set +e; $STEP certificate needs-renewal {{ zt_cert }} --expires-in {{ zt_pki.renew_before }} >/dev/null 2>&1; rc=$?; set -e
     [ $rc -eq 1 ] && echo ok || echo renew
   args:

@@ -38,7 +38,7 @@ def test_frontend_sees_the_partner_as_the_gateway_only(build):
     assert p["max_skew_s"] == 300
 
 
-def test_i5_forwards_the_partner_port_by_interface_name(build, env):
+def test_cloud_host_forwards_the_partner_port_by_interface_name(build, env):
     host = (build / "host/nftables-zt.conf").read_text()
     assert (f'iifname "{env["wan_interface"]}" tcp dport 8444 dnat ip to 192.168.122.10:8444 '
             f'comment "flows:partner-webhook"') in host
@@ -63,7 +63,7 @@ def test_partners_in_the_bank_data(build):
 
 
 # ------------------------------------------------------------------------------- bot --
-def test_bot_peer_is_a_real_client_living_on_the_i5(build):
+def test_bot_peer_is_a_real_client_living_on_the_cloud_host(build):
     conf = (build / "wireguard/client-bot.conf.j2").read_text()
     assert "Address = 10.10.0.3/32" in conf
     assert "Endpoint = 192.168.122.10:51820" in conf, "on the cloud host: the NAT network directly"

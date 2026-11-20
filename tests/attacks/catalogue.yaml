@@ -1,0 +1,163 @@
+# Stage 13 — the attack catalogue. Each attack: what the attacker wants, what stops it, and the
+# live tests that prove it (pytest node ids, run on the cloud host by `make attacks` / `make attack A=N`).
+# `remote`: the same attack played from the remote client (remote-client/attack.py, by the friend).
+# A unit test checks that every test named here exists and every remote check is implemented.
+
+A1:
+  title: Stolen laptop (Alice's certificate and key copied)
+  attacker: a thief with a full copy of Alice's certificate, key and WireGuard config
+  goal: use Alice's identity from another machine
+  defence: >-
+    revocation on the CA (`make revoke ACTOR=alice`), CRL fetched every minute by every mTLS service
+    and checked before anything else, fail-closed when the list is missing or stale; the CA refuses
+    to renew a revoked certificate; device binding for the bot (its certificate only works from its
+    own WireGuard peer); 24 h certificates (1 h for the bot) bound the damage if nobody notices
+  tests:
+    - tests/attacks/test_attacks.py::test_a1_stolen_copy_worked_before_revocation
+    - tests/attacks/test_attacks.py::test_a1_revoked_within_a_minute_without_any_restart
+    - tests/attacks/test_attacks.py::test_a1_every_service_has_the_serial
+    - tests/attacks/test_attacks.py::test_a1_alice_own_certificate_still_works
+    - tests/attacks/test_attacks.py::test_a1_ca_refuses_to_renew_the_revoked_certificate
+    - tests/attacks/test_attacks.py::test_a1_refusal_logged_with_the_serial
+    - tests/attacks/test_attacks.py::test_a1_fail_closed_without_a_fresh_list
+    - tests/attacks/test_attacks.py::test_a1_crl_fetcher_is_timed_and_least_privileged
+    - tests/edge/test_edge.py::test_stolen_bot_certificate_is_useless_on_another_machine
+  remote: [B6]
+
+A2:
+  title: Compromised frontend (root on the internet-facing VM)
+  attacker: someone who exploited the website and is root on the frontend VM
+  goal: reach the database, the ledger or the CA keys; mint identities; move money directly
+  defence: >-
+    nftables on every VM (the frontend reaches service-a, the CA and the apt cache, nothing else);
+    service-b and PostgreSQL accept only their one caller's identity; the frontend holds only its own
+    key; the database role cannot write tables directly and the history is append-only.
+    RESIDUAL RISK (docs/THREAT-MODEL.md): the frontend speaks for the customers, so while it is
+    compromised it can act as any customer within the customer routes and the bank's limits.
+  tests:
+    - tests/attacks/test_attacks.py::test_a2_compromised_frontend_reaches_only_its_flows
+    - tests/attacks/test_attacks.py::test_a2_compromised_frontend_holds_no_one_elses_key
+    - tests/attacks/test_attacks.py::test_a2_inner_services_do_not_accept_the_frontend_beyond_its_flow
+    - tests/actors/test_actors.py::test_inner_unknown_route_is_404_even_for_the_right_caller
+    - tests/services/test_services.py::test_inner_services_refuse_a_valid_but_unlisted_identity
+    - tests/bank/test_bank.py::test_application_role_cannot_write_directly
+    - tests/bank/test_bank.py::test_history_is_append_only_even_for_the_dba
+  remote: []
+
+A3:
+  title: Lateral movement from the VPN
+  attacker: a legitimate VPN client (or its stolen config) trying to reach the inside
+  goal: talk to service-a, service-b, the database, the CA, SSH, or pretend to be another VPN client
+  defence: >-
+    the gateway forwards the tunnel to the frontend's website only; each VPN key owns one /32
+    (cryptokey routing); every deny is a silent drop, logged
+  tests:
+    - tests/wireguard/test_wireguard.py::test_only_frontend_from_tunnel
+    - tests/wireguard/test_wireguard.py::test_tunnel_required_denies
+    - tests/wireguard/test_wireguard.py::test_spoofed_tunnel_address_dropped
+    - tests/wireguard/test_wireguard.py::test_tunnel_drop_logged_on_gateway
+  remote: [B3]
+
+A4:
+  title: Forged identity
+  attacker: someone presenting a certificate from their own CA, an expired one, none, or a valid one
+    for another identity
+  goal: be accepted as a customer or as a workload
+  defence: >-
+    one root, pinned everywhere; TLS 1.3 only; the SPIFFE allow-list of each service; the CA's
+    issuance policy only signs names of the policy
+  tests:
+    - tests/services/test_services.py::test_frontend_refuses
+    - tests/services/test_services.py::test_db_refuses_without_client_certificate
+    - tests/services/test_services.py::test_db_refuses_other_identity
+    - tests/web/test_web.py::test_no_certificate_no_site
+    - tests/ca/test_ca.py::test_ca_refuses
+  remote: [B2]
+
+A5:
+  title: Reconnaissance (port scans)
+  attacker: anyone on the Wi-Fi, or a VPN client
+  goal: map the services to attack
+  defence: >-
+    default drop everywhere, silent (no RST, no ICMP); the cloud host publishes only WireGuard (UDP)
+    and the partner API; the tunnel reaches only the website
+  tests:
+    - tests/attacks/test_attacks.py::test_a5_scan_from_the_tunnel_finds_only_the_website
+    - tests/attacks/test_attacks.py::test_a5_scan_from_outside_finds_only_the_published_ports
+    - tests/attacks/test_attacks.py::test_a5_scans_are_visible_in_the_drop_logs
+    - tests/final/test_drift.py::test_reachable_set_is_exactly_the_declared_flows
+    - tests/final/test_drift.py::test_denies_are_silent
+  remote: [B1]
+
+A6:
+  title: Stolen or guessed WireGuard key
+  attacker: someone with a WireGuard private key but not the pre-shared key, or a random key
+  goal: get into the tunnel
+  defence: unknown keys get no answer at all; each peer also needs its own pre-shared key
+  tests:
+    - tests/wireguard/test_wireguard.py::test_unknown_key_gets_nothing
+    - tests/wireguard/test_wireguard.py::test_stolen_private_key_without_psk_gets_nothing
+  remote: []
+
+A7:
+  title: A customer overstepping (IDOR, forged headers, other roles' routes)
+  attacker: Bob (or Alice), a genuine customer
+  goal: read or move another customer's money, use staff routes
+  defence: >-
+    routes per role at the frontend; the customer comes from the certificate, never from the
+    request; row-level security in PostgreSQL; someone else's account answers 404 (no oracle)
+  tests:
+    - tests/actors/test_actors.py::test_route_matrix
+    - tests/bank/test_bank.py::test_idor_someone_elses_account_is_not_found
+    - tests/bank/test_bank.py::test_identity_headers_from_the_client_are_ignored
+    - tests/bank/test_bank.py::test_transfer_refusals
+    - tests/bank/test_bank.py::test_row_level_security_in_the_real_database
+  remote: [B4]
+
+A8:
+  title: Cross-site request forgery
+  attacker: a malicious page open in Alice's browser, which holds her client certificate
+  goal: make the browser send a transfer
+  defence: >-
+    every POST must be JSON (no form can send it) and same-origin (Origin / Sec-Fetch-Site);
+    refused at the frontend and never forwarded
+  tests:
+    - tests/web/test_web.py::test_cross_site_transfer_refused
+    - tests/web/test_web.py::test_cross_site_refusal_logged_with_the_actor_and_never_forwarded
+  remote: [B4]
+
+A9:
+  title: Forged or replayed payment notification
+  attacker: someone on the internet who saw (or invents) a PayFlow webhook
+  goal: credit an account
+  defence: >-
+    the partner API needs PayFlow's client certificate; HMAC signature over timestamp, nonce and
+    body; ±300 s window; each nonce once; each reference credited once
+  tests:
+    - tests/edge/test_edge.py::test_partner_request_played_twice_is_refused
+    - tests/edge/test_edge.py::test_partner_retry_is_answered_not_paid
+    - tests/edge/test_edge.py::test_partner_refusals
+    - tests/edge/test_edge.py::test_partner_reaches_only_the_webhook
+    - tests/edge/test_edge.py::test_partner_identity_refused_through_the_tunnel
+  remote: [B5]
+
+A10:
+  title: Flooding and brute force
+  attacker: a client (or the bot gone wild) sending requests or connections as fast as it can
+  goal: exhaust the bank, guess things by volume
+  defence: per-identity token bucket at the frontend (429 + Retry-After); per-peer connection limit at the gateway
+  tests:
+    - tests/edge/test_edge.py::test_rate_limit_per_identity
+    - tests/edge/test_edge.py::test_gateway_limits_the_bots_connection_bursts
+  remote: []
+
+A11:
+  title: Eavesdropping and downgrade
+  attacker: someone capturing traffic on any virtual network, or offering TLS 1.2 / plaintext
+  goal: read customer data or credentials on the wire
+  defence: TLS 1.3 on every hop (and WireGuard outside), plaintext and TLS 1.2 refused, PostgreSQL included
+  tests:
+    - tests/final/test_confidentiality.py
+    - tests/services/test_services.py::test_tls12_refused
+    - tests/services/test_services.py::test_db_refuses_plaintext
+  remote: []

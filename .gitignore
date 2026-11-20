@@ -26,5 +26,6 @@ __pycache__/
 *.pyc
 
 # --- test artefacts ---
+remote-client-report.json
 tests/artifacts/
 *.pcap

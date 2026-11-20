@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""zt-crl — publish the CA's revocations to zt-mtls (stage 13). Run every minute by zt-crl.timer.
+
+  zt-crl [/etc/zt/mtls.json]
+
+1. fetch the CRL from step-ca over TLS (server checked against the pinned root);
+2. check it: signed by the intermediate of our chain, anchored at our root (openssl), not issued
+   in the future, CRL number never going backwards (an attacker cannot replay an older list
+   that did not yet contain a revocation);
+3. write the revoked serials atomically to revocation.file (JSON), read by zt-mtls.
+
+Any failure keeps the previous list and exits 1 (logged by systemd). zt-mtls itself is
+fail-closed: no list, or a list past its next update, and it refuses every request.
+Standard library + the openssl CLI only.
+"""
+import json
+import os
+import re
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from datetime import datetime, timezone
+
+PKI = os.environ.get("ZT_PKI", "/etc/zt/pki")     # override for offline tests
+ROOT, CHAIN = f"{PKI}/root_ca.crt", f"{PKI}/cert.crt"     # cert.crt = this node's leaf + intermediate
+SKEW = 300                                                 # tolerated clock difference with the CA
+
+
+def when(text, label):
+    m = re.search(rf"{label}: (.+ GMT)", text)
+    if not m:
+        raise ValueError(f"CRL without {label}")
+    return datetime.strptime(m.group(1).strip(), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc).timestamp()
+
+
+def main(conf_path):
+    rev = json.load(open(conf_path))["revocation"]
+    ctx = ssl.create_default_context(cafile=ROOT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    # straight from the CA, never through a proxy (ProxyHandler({}) ignores *_proxy variables)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx))
+    der = opener.open(rev["crl_url"], timeout=10).read()
+    with tempfile.TemporaryDirectory() as d:
+        crl, bundle = os.path.join(d, "crl.der"), os.path.join(d, "bundle.pem")
+        open(crl, "wb").write(der)
+        with open(bundle, "w") as b:
+            b.write(open(CHAIN).read() + "\n" + open(ROOT).read())
+        v = subprocess.run(["openssl", "crl", "-inform", "DER", "-in", crl, "-CAfile", bundle, "-noout"],
+                           capture_output=True, text=True)
+        if v.returncode != 0 or "verify OK" not in v.stdout + v.stderr:
+            raise ValueError(f"CRL signature does not verify: {(v.stdout + v.stderr).strip()[:200]}")
+        text = subprocess.run(["openssl", "crl", "-inform", "DER", "-in", crl, "-noout", "-text"],
+                              capture_output=True, text=True, check=True).stdout
+    this_update, next_update = when(text, "Last Update"), when(text, "Next Update")
+    if this_update > time.time() + SKEW:
+        raise ValueError("CRL issued in the future")
+    m = re.search(r"X509v3 CRL Number:\s*\n\s*(\S+)", text)
+    raw = m.group(1).replace(":", "").removeprefix("0x") if m else "0"
+    number = int(raw) if raw.isdigit() else int(raw, 16)
+    serials = sorted({s.upper().lstrip("0") or "0" for s in re.findall(r"Serial Number: ([0-9A-Fa-f]+)", text)})
+    try:
+        old = json.load(open(rev["file"]))
+        if number < old.get("crl_number", -1):
+            raise ValueError(f"CRL number went backwards ({number} < {old['crl_number']}): refused")
+    except (OSError, ValueError, KeyError) as e:
+        if "backwards" in str(e):
+            raise
+    out = {"revoked": serials, "crl_number": number, "this_update": int(this_update),
+           "next_update": int(next_update), "fetched_at": int(time.time()), "source": rev["crl_url"]}
+    tmp = rev["file"] + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(out, f, indent=1)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, rev["file"])
+    print(f"zt-crl: CRL #{number}, {len(serials)} revoked, valid until "
+          f"{datetime.fromtimestamp(next_update, timezone.utc):%Y-%m-%d %H:%M} UTC")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1] if len(sys.argv) > 1 else "/etc/zt/mtls.json")
+    except Exception as e:      # keep the previous list; systemd logs the reason
+        print(f"zt-crl: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)

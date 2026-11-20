@@ -79,7 +79,7 @@ def test_templates_carry_no_key():
         assert not has_key, f"{t} contains a key"   # boolean: never print the file
 
 
-def test_i7_export(env):
+def test_remote_client_export(env):
     """What is produced for each real peer: its wg0.conf, private, least privilege. The remote client dials
     the cloud host's mDNS name; a peer living ON the cloud host (netns, the stage 12 bot) dials the gateway directly.
     Checks are booleans: a failure must never print the file, it holds the peer's keys."""

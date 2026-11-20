@@ -712,6 +712,14 @@ def render_mtls(policy: dict, node: str, rules: list[Rule]) -> dict:
             entry["max_skew_s"] = policy.get("webhook", {}).get("max_skew_seconds", 300)
     out = {"node": node, "identity": spiffe(policy, node), "min_tls": policy["cert"]["min_tls"],
            "serves": serves, "calls": calls, "actors": actors}
+    if any(e.get("protocol", "https") == "https" for e in serves.values()):
+        # revocation (stage 13): the CA's CRL, fetched every minute by zt-crl and checked by
+        # signature, lists the revoked serials; zt-mtls refuses them, and refuses everyone when
+        # that list is missing or out of date (fail-closed)
+        ca_svc = policy["services"]["step-ca"]
+        ca_ip = policy["nodes"][ca_svc["node"]]["interfaces"][ca_svc["network"]]
+        out["revocation"] = {"crl_url": f"https://{ca_ip}:{ca_svc['port']}/1.0/crl",
+                             "file": "/etc/zt/pki/revoked.json"}
     if any("app" in e for e in serves.values()):
         bank = render_bank(policy)
         out["bank"] = {k: bank[k] for k in ("currency", "max_transfer_cents", "daily_limit_cents")}

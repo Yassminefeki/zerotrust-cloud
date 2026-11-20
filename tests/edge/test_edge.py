@@ -161,7 +161,7 @@ def alice_balance():
     return {a["id"]: a["balance"] for a in r["body"]["accounts"]}["ZTB-ALICE-01"]
 
 
-def test_published_by_interface_name_on_the_i5():
+def test_published_by_interface_name_on_the_cloud_host():
     live = run(["nft", "list", "table", "inet", "zt_host"], sudo=True, check=True).stdout
     env_iface = re.search(r'iifname "([^"]+)" udp dport', live).group(1)
     assert f'iifname "{env_iface}" tcp dport 8444 dnat ip to {PUBLISHED["to"]}' in live

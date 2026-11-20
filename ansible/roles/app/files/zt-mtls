@@ -87,6 +87,40 @@ class RateLimiter:
 
 
 LIMITER = RateLimiter()
+
+
+class Revocation:
+    """Serials the CA revoked: the CRL fetched every minute by zt-crl (signature checked there).
+    Fail-closed: no list, or a list past its next update -> nobody gets in until it is fresh."""
+
+    def __init__(self, path):
+        self.path, self.mtime, self.serials, self.next_update = path, None, set(), 0
+
+    def status(self, serial_hex):
+        """-> "ok" | "revoked" | "unknown" (no usable list)"""
+        if not self.path:
+            return "ok"
+        try:
+            st = os.stat(self.path)
+            if st.st_mtime != self.mtime:
+                d = json.load(open(self.path))
+                self.serials = {int(x, 16) for x in d["revoked"]}
+                self.next_update, self.mtime = d["next_update"], st.st_mtime
+        except (OSError, ValueError, KeyError):
+            return "unknown"
+        if time.time() > self.next_update:
+            return "unknown"
+        return "revoked" if int(serial_hex, 16) in self.serials else "ok"
+
+
+REVOCATION = Revocation(CONF.get("revocation", {}).get("file"))
+
+
+def check_not_revoked(peercert, who):
+    """The other side of a connection we initiate must not be revoked either."""
+    state = REVOCATION.status(peercert.get("serialNumber", "0"))
+    if state != "ok":
+        raise PermissionError(f"{who}: certificate {peercert.get('serialNumber')} {state}")
 THROTTLED = set()          # identities currently refused (log the start of a burst only)
 
 
@@ -135,6 +169,7 @@ def call_https(name, path):
         ids = spiffe_ids(conn.sock.getpeercert())
         if ids != [spec["expected_id"]]:
             raise PermissionError(f"{spec['address']} presented {ids}, expected {spec['expected_id']}")
+        check_not_revoked(conn.sock.getpeercert(), spec["address"])
         conn.request("GET", path)
         r = conn.getresponse()
         body = r.read()
@@ -162,6 +197,7 @@ def call_api(method, path, body=None, headers=None):
         ids = spiffe_ids(conn.sock.getpeercert())
         if ids != [spec["expected_id"]]:
             raise PermissionError(f"{spec['address']} presented {ids}, expected {spec['expected_id']}")
+        check_not_revoked(conn.sock.getpeercert(), spec["address"])
         data = json.dumps(body).encode() if body is not None else None
         h = dict(headers or {})
         if data is not None:
@@ -305,13 +341,20 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(int(n))
 
     def authorize(self, method, path):
-        ids = spiffe_ids(self.request.getpeercert())
+        cert = self.request.getpeercert()
+        ids = spiffe_ids(cert)
         self.peer_id = ids[0] if len(ids) == 1 else None
         self.actor = CONF.get("actors", {}).get(self.peer_id, {})
         self.route = None
         src = ipaddress.ip_address(self.client_address[0])
         code = 403
-        if not any(src in ipaddress.ip_network(n) for n in self.listener["allowed_sources"]):
+        revocation = REVOCATION.status(cert.get("serialNumber", "0"))
+        if revocation == "revoked":
+            # checked first: a revoked certificate gets nothing, whoever it names
+            reason = f"certificate {cert.get('serialNumber')} of {ids} is revoked"
+        elif revocation == "unknown":
+            code, reason = 503, "revocation status unknown (no fresh CRL): refusing everyone"
+        elif not any(src in ipaddress.ip_network(n) for n in self.listener["allowed_sources"]):
             reason = f"source {src} not allowed"
         elif self.peer_id not in self.listener["allowed_ids"]:
             reason = f"identity {ids} not allowed"
@@ -336,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.route = route
                 return True
         log.info("refused %s: %s", src, reason)
-        self._send(code, {"error": "forbidden" if code == 403 else "not found", "reason": reason})
+        self._send(code, {"error": {403: "forbidden", 404: "not found"}.get(code, "unavailable"), "reason": reason})
         return False
 
     def do_POST(self):
@@ -368,6 +411,9 @@ class Handler(BaseHTTPRequestHandler):
         if name != "diag-chain" and self.listener.get("app") and zt_bank:
             try:
                 status, body = zt_bank.handle(self.listener["app"], Request(self, method, url, raw), Tools)
+            except OSError as e:       # next hop unreachable, not who we expect, or revoked
+                log.info("next hop refused on %s %s: %s", method, url.path, e)
+                status, body = 502, {"error": "next hop unavailable", "reason": str(e)}
             except Exception as e:     # never leak a traceback to the caller
                 log.exception("app error on %s %s: %s", method, url.path, e)
                 status, body = 500, {"error": "internal error"}

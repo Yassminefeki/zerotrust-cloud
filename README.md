@@ -86,13 +86,15 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | 10 | `make services` | `make test-10` | ZT Bank live: own accounts only, IDOR → 404, transfers, replay-safe, RLS + append-only in the real DB, audit |
 | 11 | `make services client-certs` | `make test-11` | the website through the tunnel (strict CSP, repo files, read-only), CSRF refused + logged, Firefox bundles for the remote client |
 | 12 | `make host wireguard firewall services client-certs bot` | `make test-12` | the bot (own netns, device-bound certificate, rate limits) and the partner webhook from outside without VPN (signature, time window, anti-replay) |
+| 13 | `make ca services` | `make test-13`, `make attacks` | live attacks A1–A11 (revocation within a minute and fail-closed, compromised frontend contained, full port scans), audit report; B1–B6 from the remote client |
 
 The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
 Ubuntu's SHA256SUMS) into `~/.cache/zerotrust/`; `make infra` uploads that local copy, so a
 `make destroy && make up` never downloads it again.
 
 Other targets: `make destroy` (VMs and networks; host prep stays), `make recreate-vms`,
-`make test-peer` / `make test-peer-down` (the tunnel test client), `make clean`.
+`make test-peer` / `make test-peer-down` (the tunnel test client), `make revoke`, `make audit`,
+`make demo`, `make clean`.
 SSH to any VM over mgmt: `ssh -F build/ssh_config frontend`.
 
 ## Host preparation (stage 1) — what `make host` changes on the cloud host
@@ -421,3 +423,61 @@ root, and use `--url https://<entry_point>:8444/webhook`.
 Tests: offline, `tests/unit/test_partner.py` (webhook, replay, window, signature, roles re-checked,
 device binding, rate limit on the real services + PostgreSQL), `test_bank_sql.py` (the database
 alone refuses replays), `test_edge_generated.py` (NAT, limits, validation). Live, `make test-12`.
+
+## Attacks, revocation and audit (stage 13)
+
+Everything above is now attacked on purpose. The **attack catalogue**
+(`tests/attacks/catalogue.yaml`, `make attack-list`) names, for each attack, the attacker, the goal,
+the defence and the live tests that prove the defence; the threat model and its residual risks are
+in [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+
+| | Attack | Cloud host | Remote client |
+|---|---|---|---|
+| A1 | stolen laptop: a copy of Alice's certificate | revoked → refused everywhere in ≤ 60 s, Alice's own still works, CA refuses renewal, fail-closed | B6 (live with Firefox) |
+| A2 | root on the frontend | reaches only service-a / CA / apt cache, holds no other key, refused by the ledger | — |
+| A3 | lateral movement from the VPN, spoofed tunnel address | gateway: tunnel → website only | B3 |
+| A4 | forged identities (own CA, expired, none, another one) | refused at the handshake or by the allow-list | B2 |
+| A5 | full TCP port scans, from the tunnel and from outside | only 8443 in the tunnel, only 8444 outside; silent drops, logged | B1 |
+| A6 | stolen/guessed WireGuard key without the PSK | no answer | — |
+| A7 | customer overstepping: IDOR, forged headers, other roles | 404 / ignored / 403, RLS | B4 |
+| A8 | CSRF from a malicious page | 415 / 403, never forwarded | B4 |
+| A9 | forged / replayed payment notification | partner mTLS, HMAC, ±300 s, nonce + reference once | B5 |
+| A10 | flooding | 429 per identity, connection limit per peer | — |
+| A11 | eavesdropping, TLS 1.2 / plaintext | TLS 1.3 everywhere, PostgreSQL included | — |
+
+```bash
+make test-13              # the new live attacks: A1 (revocation), A2 (compromised frontend), A5 (scans)
+make attacks              # the whole catalogue A1-A11 -> build/reports/attacks.md (+ .json), exit 1 on any BREACH
+make attack A=1,5         # some of them
+make revoke ACTOR=alice [REASON="stolen laptop"]    # or NODE=frontend: revoke now
+make audit [SINCE="2 hours ago"]                    # -> build/reports/audit.md, exit 1 on any finding
+make demo                 # narrated walk-through, revocation of Alice live with the remote client
+```
+
+**Revocation.** step-ca keeps a CRL (`generateOnRevoke`). On every mTLS VM, `zt-crl` (systemd
+timer, every minute) fetches it pinned to our root, checks its signature, refuses an older CRL
+number (rollback), and publishes the revoked serials; `zt-mtls` refuses a revoked caller (403,
+logged with the serial) and a revoked upstream (502), without restarting. No list or a stale one
+(past the CRL's next update): **everyone** gets 503 — fail-closed. `make revoke` mints a one-time
+revocation token on the CA (its password never leaves the VM), revokes, refreshes every service at
+once; for an actor it sets the old key aside (`ansible/.secrets/pki/<cn>/revoked/<serial>/`) so
+`make client-certs` issues a new key and certificate, and the Firefox bundle is rebuilt.
+For a VM: `make revoke NODE=service-a` then `make certs` (re-enrols it with a new key).
+
+**Remote client.** The friend runs the B checks from the repository, nothing to install:
+`git pull && python3 remote-client/attack.py` (see [`remote-client/README.md`](remote-client/README.md)).
+Every address is read from `policy.yaml`; the report `remote-client-report.json` goes back to the
+cloud host's `build/reports/` and into `make audit`. Remember: the remote client's certificates live
+24 h — after `make client-certs`, send `build/export/remote-client/{alice,dev}/` again.
+
+**Audit.** `make audit` reads, over SSH and read-only: requests per identity, every refusal with
+its reason, the CRL in force on each service, certificate expiry (VMs and actors), the nftables
+drops of every VM, step-ca's activity, the bank's audit table and the ledger balance, and the
+latest attack reports. It flags: a stale or diverging CRL, an unbalanced ledger, an attack not
+defended, an unreachable VM.
+
+Tests: offline, `tests/unit/test_revocation.py` (real `zt-crl` on a real CRL, signature, rollback,
+other signer; revoked caller and upstream refused on the real services; fail-closed),
+`test_attack_suites.py` (catalogue ↔ tests, the runner's verdicts, the scanner, and the remote
+client's checks against the real services: DEFENDED, and BREACH when a defence is missing),
+`test_audit.py`. Live, `make test-13` and `make attacks`.

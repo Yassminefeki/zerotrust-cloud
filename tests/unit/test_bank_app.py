@@ -8,6 +8,7 @@ ZT_TEST_PG_RUNAS=<user> to run the database as that user.
 """
 import http.client
 import json
+import pathlib
 import os
 import shutil
 import socket
@@ -117,6 +118,7 @@ ssl_min_protocol_version = 'TLSv1.3'
     nxt = {"frontend": ("service-a", "api-a"), "service-a": ("service-b", "api-b")}
     procs = []
     partner_port = free_port(IP["frontend"])
+    write_revoked(d / "revoked.json", [])             # nothing revoked yet, fresh for a day
     (d / "partners").mkdir()
     for node in ("service-b", "service-a", "frontend"):
         m = json.loads((build / f"nodes/{node}/mtls.json").read_text())
@@ -124,6 +126,8 @@ ssl_min_protocol_version = 'TLSv1.3'
             lport = partner_port if s.get("app") == "partner" else ports[node]
             s["listen"], s["port"] = f"{IP[node]}:{lport}", lport
             s["allowed_sources"] = ["127.0.0.0/8"] if node == "frontend" else ["127.0.0.1"]
+        if "revocation" in m:                           # the CRL's serials, as zt-crl publishes them
+            m["revocation"]["file"] = str(d / "revoked.json")
         for a in m.get("actors", {}).values():          # device-bound identities: their device is here
             if "sources" in a:
                 a["sources"] = ["127.0.0.1/32"]
@@ -155,6 +159,17 @@ ssl_min_protocol_version = 'TLSv1.3'
         p.terminate()
         p.wait(5)
     subprocess.run(pre + [pg_bin("pg_ctl"), "-D", str(pg / "data"), "-m", "fast", "stop"], capture_output=True)
+
+
+def write_revoked(path, serials, next_update_in=86400, crl_number=1):
+    """What zt-crl writes from the CA's CRL (tests/unit/test_revocation.py runs zt-crl itself)."""
+    import time
+    path = pathlib.Path(path)
+    path.write_text(json.dumps({"revoked": [s.upper() for s in serials], "crl_number": crl_number,
+                                "this_update": int(time.time()) - 60,
+                                "next_update": int(time.time()) + next_update_in}))
+    st = path.stat()                                  # a new mtime even within the same second
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
 
 
 def call(bank, who, method, path, body=None, headers=None, to="frontend", raw=None, src=None):
