@@ -49,7 +49,7 @@ def test_i5_forwards_the_partner_port_by_interface_name(build, env):
 def test_partner_identity_cannot_use_the_customer_site_nor_the_tunnel(build):
     https = mtls(build, "frontend")["serves"]["https"]
     assert "spiffe://cloud.local/partner/payflow" not in https["allowed_ids"]
-    for c in ("client-i7.conf.j2", "client-bot.conf.j2"):
+    for c in ("client-remote-client.conf.j2", "client-bot.conf.j2"):
         assert "8444" not in (build / "wireguard" / c).read_text()
 
 
@@ -66,7 +66,7 @@ def test_partners_in_the_bank_data(build):
 def test_bot_peer_is_a_real_client_living_on_the_i5(build):
     conf = (build / "wireguard/client-bot.conf.j2").read_text()
     assert "Address = 10.10.0.3/32" in conf
-    assert "Endpoint = 192.168.122.10:51820" in conf, "on the i5: the NAT network directly"
+    assert "Endpoint = 192.168.122.10:51820" in conf, "on the cloud host: the NAT network directly"
     assert "AllowedIPs = 10.20.0.10/32" in conf, "routes only what the tunnel may reach (unlike the test peer)"
     wg = json.loads((build / "wireguard/wireguard.json").read_text())
     assert next(p for p in wg["peers"] if p["name"] == "bot")["netns"] == "zt-bot"

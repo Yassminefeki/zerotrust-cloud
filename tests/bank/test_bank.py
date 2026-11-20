@@ -1,4 +1,4 @@
-"""Stage 10 — ZT Bank, live, through the WireGuard tunnel. Run with `make test-10` (on the i5).
+"""Stage 10 — ZT Bank, live, through the WireGuard tunnel. Run with `make test-10` (on the cloud host).
 
 The client is the test peer (netns zt-peer) presenting the actors' real certificates; the bank
 runs on the real VMs (frontend -> service-a -> service-b -> PostgreSQL).

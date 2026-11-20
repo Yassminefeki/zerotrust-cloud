@@ -1,4 +1,4 @@
-"""Stage 9 — actors and per-route permissions. Run with `make test-9` (on the i5, sudo).
+"""Stage 9 — actors and per-route permissions. Run with `make test-9` (on the cloud host, sudo).
 
 Every actor of policy.yaml calls every route of the frontend through the WireGuard tunnel, with
 its own certificate. The expected answer comes from the policy (routes x roles):
@@ -136,9 +136,9 @@ def test_bot_certificate_is_short_lived():
 
 
 def test_same_machine_different_rights():
-    """Alice and Dev are both exported to the i7: same device, same tunnel, different permissions."""
-    i7 = [i for i in PKI["identities"].values() if i.get("export_to") == "i7"]
-    assert {i["actor"] for i in i7} == {"alice", "dev"}
+    """Alice and Dev are both exported to the remote client: same device, same tunnel, different permissions."""
+    rc = [i for i in PKI["identities"].values() if i.get("export_to") == "remote-client"]
+    assert {i["actor"] for i in rc} == {"alice", "dev"}
     alice_routes = {r["name"] for r in ROUTES if "customer" in r["allow"]}
     dev_routes = {r["name"] for r in ROUTES if "staff" in r["allow"]}
     assert "accounts" in alice_routes - dev_routes and "status" in dev_routes - alice_routes

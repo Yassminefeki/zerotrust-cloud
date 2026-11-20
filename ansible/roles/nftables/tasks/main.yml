@@ -1,6 +1,6 @@
 ---
 # Default-drop nftables on every VM, generated from policy.yaml (build/nodes/<vm>/nftables.conf).
-# Anti lock-out: the ruleset always keeps SSH from the i5 over mgmt (checked by unit tests), and
+# Anti lock-out: the ruleset always keeps SSH from the cloud host over mgmt (checked by unit tests), and
 # it is loaded with an automatic rollback that only a fresh SSH connection can disarm.
 
 - name: The generated ruleset is the only firewall (ufw off)

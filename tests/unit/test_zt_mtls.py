@@ -92,7 +92,7 @@ def net(tmp_path_factory):
     ips = {"frontend": "127.0.0.10", "service-a": "127.0.0.11", "service-b": "127.0.0.12"}
     ports = {n: free_port(ip) for n, ip in ips.items()}
     addr = {n: f"{ips[n]}:{ports[n]}" for n in ips}
-    peer, i7 = f"{TD}/client/test-peer", f"{TD}/client/i7"
+    peer, rc = f"{TD}/client/test-peer", f"{TD}/client/remote-client"
 
     def routes(*specs):
         return [{"name": n, "method": m, "path": p, "allow_ids": ids} for n, m, p, ids in specs]
@@ -101,16 +101,16 @@ def net(tmp_path_factory):
                                   ("diag-chain", "GET", "/chain", [caller]))
     confs = {
         "frontend": {"serves": {"https": {
-                         "allowed_ids": [i7, peer], "allowed_sources": ["127.0.0.0/8"],
+                         "allowed_ids": [rc, peer], "allowed_sources": ["127.0.0.0/8"],
                          "routes": routes(("health", "GET", "/health", [peer]),
                                           ("diag-chain", "GET", "/chain", [peer]),
-                                          ("whoami", "GET", "/api/me", [peer, i7]),
-                                          ("accounts", "GET", "/api/accounts", [i7]),   # not the peer's
+                                          ("whoami", "GET", "/api/me", [peer, rc]),
+                                          ("accounts", "GET", "/api/accounts", [rc]),   # not the peer's
                                           ("transfer", "POST", "/api/transfers", [peer]),
                                           ("history", "GET", "/api/accounts/*/transactions", [peer]))}},
                      "calls": {"api-a": {"address": addr["service-a"], "expected_id": f"{TD}/service-a"}},
                      "actors": {peer: {"actor": "peer", "role": "customer", "customer": "peer"},
-                                i7: {"actor": "i7", "role": "staff"}}},
+                                rc: {"actor": "remote-client", "role": "staff"}}},
         "service-a": {"serves": {"api-a": {"allowed_ids": [f"{TD}/frontend"], "allowed_sources": ["127.0.0.1"],
                                            "routes": inner(f"{TD}/frontend")}},
                       "calls": {"api-b": {"address": addr["service-b"], "expected_id": f"{TD}/service-b"}}},
@@ -253,7 +253,7 @@ def test_whoami_returns_the_actor(net):
 
 
 def test_route_of_someone_else_is_403(net):
-    """test-peer is a valid caller of the frontend, but /api/accounts is open to i7 only."""
+    """test-peer is a valid caller of the frontend, but /api/accounts is open to remote-client only."""
     status, body = raw(net, "frontend", "GET", "/api/accounts")
     assert status == 403 and "route accounts" in body["reason"]
 

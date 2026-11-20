@@ -1,7 +1,7 @@
-"""Stage 7 — the services, end to end. Run with `make test-7` (on the i5, asks for sudo once).
+"""Stage 7 — the services, end to end. Run with `make test-7` (on the cloud host, asks for sudo once).
 
-The client is the WireGuard test peer (netns zt-peer on the i5) with its own certificate
-as an actor of policy.yaml (Dev, staff: the diagnostic routes), exactly like the i7 would.
+The client is the WireGuard test peer (netns zt-peer on the cloud host) with its own certificate
+as an actor of policy.yaml (Dev, staff: the diagnostic routes), exactly like the remote client would.
 """
 import re
 import time

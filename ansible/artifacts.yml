@@ -1,4 +1,4 @@
-# Runs on the i5: fetch what the isolated VMs cannot download themselves, and create the
+# Runs on the cloud host: fetch what the isolated VMs cannot download themselves, and create the
 # secrets (random, 0600, gitignored) before any VM needs them.
 - name: Artifacts and secrets on the CLOUD host
   hosts: localhost

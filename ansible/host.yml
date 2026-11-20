@@ -1,6 +1,6 @@
-# Stage 1 — prepare the i5 (CLOUD host). Run via `make host` (asks for your sudo password).
+# Stage 1 — prepare the cloud host (CLOUD host). Run via `make host` (asks for your sudo password).
 # Idempotent. Never default-drops the host, never touches Docker's own rules.
-- name: Prepare the CLOUD host (i5)
+- name: Prepare the cloud host
   hosts: localhost
   connection: local
   gather_facts: true

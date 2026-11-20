@@ -1,7 +1,7 @@
 # =============================================================================
 # policy.yaml — SINGLE SOURCE OF TRUTH for the zero-trust mini-cloud
 # -----------------------------------------------------------------------------
-# Versioned. Network-independent: nothing here depends on where the i5 is
+# Versioned. Network-independent: nothing here depends on where the cloud host is
 # plugged in (Wi-Fi IP, interface name, hostname all live in env.yaml).
 #
 # Everything is DEFAULT DENY. A packet is allowed only if it matches one entry
@@ -21,7 +21,7 @@ cert:
 # --- Networks ----------------------------------------------------------------
 # `iface` is the name the VM's NIC gets (netplan set-name, matched by MAC), so
 # nftables rules can match by interface name on every VM.
-# `host_ip`: address the i5 gets on that bridge. Only mgmt (Ansible/SSH, apt
+# `host_ip`: address the cloud host gets on that bridge. Only mgmt (Ansible/SSH, apt
 # cache) and wan (libvirt NAT) have one: dmz/app/data are pure L2 for the host.
 networks:
   wan:    {cidr: 192.168.122.0/24, mode: nat,      iface: wan0,  bridge: virbr-zt-wan,  host_ip: 192.168.122.1}
@@ -71,7 +71,7 @@ principals:
     network: tunnel
     # The mTLS identities a tunnel client may present = every actor with `entry: tunnel`
     # (see `actors` below); the generator derives the list, so it cannot drift.
-  host:                                # the i5 itself, on the mgmt bridge
+  host:                                # the cloud host itself, on the mgmt bridge
     cidr: 10.50.0.1/32
     network: mgmt
 
@@ -81,7 +81,7 @@ services:
   # app: which part of ZT Bank the service runs (web = the site + API the actors use,
   # core = business rules, ledger = the only one that talks to the database)
   https:     {node: frontend,  network: dmz,  port: 8443,  proto: tcp, mtls: true, app: web}
-  # partner = the webhook a payment provider calls from the internet, WITHOUT the VPN. The i5
+  # partner = the webhook a payment provider calls from the internet, WITHOUT the VPN. The cloud host
   # publishes this port on its WAN interface; the gateway forwards it (DNAT + SNAT) to the frontend.
   partner-api: {node: frontend, network: dmz, port: 8444, proto: tcp, mtls: true, app: partner}
   api-a:     {node: service-a, network: app,  port: 9443,  proto: tcp, mtls: true, app: core}
@@ -105,13 +105,13 @@ flows:
 
 # --- Management plane (mgmt network only; never crosses to data planes) --------
 infra:
-  - {name: admin-ssh,  from: host, to: ssh}        # Ansible + testinfra from the i5
+  - {name: admin-ssh,  from: host, to: ssh}        # Ansible + testinfra from the cloud host
   - {name: pki,        from: "*",  to: step-ca}    # enrolment + 24h renewal
-  - {name: packages,   from: "*",  to: apt-cache}  # apt via apt-cacher-ng on the i5
+  - {name: packages,   from: "*",  to: apt-cache}  # apt via apt-cacher-ng on the cloud host
 
 # --- Actors: WHO uses the bank ------------------------------------------------------
 # Identity = spiffe://<trust_domain>/<role>/<name>, certificate CN = <role>-<name>.
-# Keys are generated on the i5 (ansible/.secrets/pki), never committed; `export_to` names the
+# Keys are generated on the cloud host (ansible/.secrets/pki), never committed; `export_to` names the
 # WireGuard peer (machine) whose export folder receives the actor's certificate.
 # rate_limit: requests per identity at the frontend (token bucket, burst = one period's worth);
 # beyond it the frontend answers 429 and logs the identity.
@@ -121,9 +121,9 @@ roles:
   bot:      {description: "automated statements job: read-only, short-lived certificate", rate_limit: 20/min}
   partner:  {description: "payment provider: credits incoming payments, signed webhooks only", rate_limit: 60/min}
 actors:
-  alice:      {role: customer, customer: alice, full_name: Alice Martin, entry: tunnel, export_to: i7}
+  alice:      {role: customer, customer: alice, full_name: Alice Martin, entry: tunnel, export_to: remote-client}
   bob:        {role: customer, customer: bob,   full_name: Bob Durand,   entry: tunnel}   # tests act as Bob
-  dev:        {role: staff,                     entry: tunnel, export_to: i7}
+  dev:        {role: staff,                     entry: tunnel, export_to: remote-client}
   # device: the identity is accepted only from that WireGuard peer's address (certificate + machine)
   statements: {role: bot,                       entry: tunnel, cert_lifetime: 1h, device: bot}
   payflow:    {role: partner, full_name: PayFlow SAS, entry: internet}
@@ -136,7 +136,7 @@ bank:
 
 # --- Partner webhooks (anti-replay) ------------------------------------------------------------
 # Every call is signed: HMAC-SHA256(secret, "<timestamp>.<nonce>.<body>") with a per-partner
-# secret generated on the i5 (never committed). Refused: bad signature, timestamp further than
+# secret generated on the cloud host (never committed). Refused: bad signature, timestamp further than
 # max_skew_seconds from now, a nonce already seen (kept in the database), a reference already
 # credited with other values. The same reference again with a NEW nonce is a safe retry.
 webhook:
@@ -182,11 +182,11 @@ routes:
 # --- WireGuard peers (keys generated by Ansible, never committed) --------------
 wireguard:
   peers:
-    - {name: i7,        ip: 10.10.0.2}     # exported template, i7 side not managed here
-    # netns: a peer that lives on the i5 in its own network namespace (the statements bot).
+    - {name: remote-client,        ip: 10.10.0.2}     # exported template, remote-client side not managed here
+    # netns: a peer that lives on the cloud host in its own network namespace (the statements bot).
     # conn_limit: new connections per second it may open through the gateway (burst = 2x).
     - {name: bot,       ip: 10.10.0.3, netns: zt-bot, conn_limit: 5/second}
-    # test: true = a HOSTILE probe client for tests/ (netns on the i5). It routes EVERY policy
+    # test: true = a HOSTILE probe client for tests/ (netns on the cloud host). It routes EVERY policy
     # network into the tunnel, so blocking is proven by the gateway, not by its own routes, and it
     # reaches the gateway on the NAT network (a host cannot DNAT its own Wi-Fi traffic).
     - {name: test-peer, ip: 10.10.0.200, test: true}

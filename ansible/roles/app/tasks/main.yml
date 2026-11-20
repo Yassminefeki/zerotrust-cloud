@@ -9,7 +9,7 @@
   ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/apt_update.yml"
   when: zt_mtls.calls.values() | selectattr('protocol', 'equalto', 'postgres') | list | length > 0
 
-- name: psycopg2 where the service calls the database (through the apt cache on the i5)
+- name: psycopg2 where the service calls the database (through the apt cache on the cloud host)
   ansible.builtin.apt:
     name: python3-psycopg2
     lock_timeout: 600

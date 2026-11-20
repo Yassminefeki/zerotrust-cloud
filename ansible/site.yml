@@ -1,5 +1,5 @@
 # Full deployment, in the order that avoids locking ourselves out:
-#   CA -> nftables (SSH from the i5 over mgmt stays open) -> WireGuard -> certs -> services
+#   CA -> nftables (SSH from the cloud host over mgmt stays open) -> WireGuard -> certs -> services
 # Each stage is also runnable alone (make ca, make firewall, ...). Later stages are added here
 # as they are implemented.
 - name: Stage 3 - internal CA

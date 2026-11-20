@@ -1,4 +1,4 @@
-"""Stage 3 — internal CA (step-ca on VM6). Run with `make test-3` (on the i5).
+"""Stage 3 — internal CA (step-ca on VM6). Run with `make test-3` (on the cloud host).
 
 Expected values come from build/pki/pki.json (generated from policy.yaml)."""
 import hashlib
@@ -85,7 +85,7 @@ def test_config_from_policy(ca, pki):
     assert cfg["tls"]["minVersion"] == 1.3
 
 
-# ------------------------------------------------------------ from the i5 --
+# ------------------------------------------------------------ from the cloud host --
 def test_root_exported_and_fingerprint_matches(ca):
     root = BUILD / "pki" / "root_ca.crt"
     fp_file = BUILD / "pki" / "root_ca.fingerprint"
@@ -98,8 +98,8 @@ def test_root_exported_and_fingerprint_matches(ca):
 
 
 def test_health_over_tls13_with_pinned_root(ca, pki):
-    """Run on the CA VM: after stage 4 the i5 may only SSH to the VMs (policy: admin-ssh),
-    so it cannot reach :9000 itself. The root used here is the one pinned on the i5."""
+    """Run on the CA VM: after stage 4 the cloud host may only SSH to the VMs (policy: admin-ssh),
+    so it cannot reach :9000 itself. The root used here is the one pinned on the cloud host."""
     url = f"{pki['ca']['url']}/health"
     r = ca.run(f"curl -s --tlsv1.3 --tls-max 1.3 --cacert /etc/step-ca/certs/root_ca.crt {url}")
     assert r.rc == 0 and json.loads(r.stdout) == {"status": "ok"}, r.stderr

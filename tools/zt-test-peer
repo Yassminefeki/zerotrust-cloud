@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # zt-test-peer up CONF [NS] | down [NS] | status [NS] — a WireGuard client in its own network
-# namespace on the i5 (run as root). NS defaults to zt-peer, the hostile test client; the statements
+# namespace on the cloud host (run as root). NS defaults to zt-peer, the hostile test client; the statements
 # bot uses the same mechanism in zt-bot (`make bot`), with its own key and a real client's routes.
 #
 # Network namespace "$NS" whose ONLY interface is the tunnel:

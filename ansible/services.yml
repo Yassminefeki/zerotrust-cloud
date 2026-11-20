@@ -1,7 +1,7 @@
 # Stage 7 — the services. `make services`
 #   database: PostgreSQL, TLS 1.3, client certificate only (pg_hba from policy.yaml)
 #   frontend, service-a, service-b: zt-mtls (mTLS 1.3, SPIFFE allowlists from policy.yaml)
-#   partners (stage 12): one webhook secret per payment partner, generated on the i5 and deployed
+#   partners (stage 12): one webhook secret per payment partner, generated on the cloud host and deployed
 #   to the node that serves the partner API only.
 # Database first, so the chain works as soon as the last service starts.
 - name: Partner webhook secrets on the CLOUD host

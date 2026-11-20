@@ -7,7 +7,7 @@
 Output: {"ok": bool, "stage": "connect|handshake|response", "status": int|null,
          "tls": "TLSv1.3"|null, "server_ids": [...], "body": {...}|str|null, "error": str|null}
 A refusal by the server shows up as stage=handshake/response with an error, or status 403.
-Stdlib only: it runs on the i5, inside the test peer's netns, and on the VMs.
+Stdlib only: it runs on the cloud host, inside the test peer's netns, and on the VMs.
 """
 import argparse
 import http.client

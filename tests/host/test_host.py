@@ -1,4 +1,4 @@
-"""Stage 1 — the i5 is ready to host the cloud. Run with `make test-1` (on the i5)."""
+"""Stage 1 — the cloud host is ready to host the cloud. Run with `make test-1` (on the cloud host)."""
 import ipaddress
 import json
 import os

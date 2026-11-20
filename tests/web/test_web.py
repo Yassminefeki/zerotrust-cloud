@@ -1,11 +1,11 @@
-"""Stage 11 — the ZT Bank website, live. Run with `make test-11` (on the i5).
+"""Stage 11 — the ZT Bank website, live. Run with `make test-11` (on the cloud host).
 
 * the site is served by the real frontend, through the WireGuard tunnel, to every actor, with
   the strict Content-Security-Policy, exactly the files of the repository, read-only on the VM;
 * cross-site request forgery is refused on the real chain (and logged with the real actor);
 * the Firefox bundle of each exported actor (build/export/<peer>/<actor>/) is complete, private,
   AES-256 encrypted, opens with its password only and holds the right identity.
-The browser itself is tested offline with a real Chrome (tests/unit/test_web_ui.py); the i7
+The browser itself is tested offline with a real Chrome (tests/unit/test_web_ui.py); the remote client
 imports the bundle by hand (FIREFOX.txt).
 """
 import hashlib

@@ -28,7 +28,7 @@
     state: directory
     mode: "0755"
 
-- name: Copy step-cli (downloaded on the i5; the VM has no internet)
+- name: Copy step-cli (downloaded on the cloud host; the VM has no internet)
   ansible.builtin.copy:
     src: "{{ zt_artifacts }}/step-cli_amd64.deb"
     dest: /var/cache/zerotrust/step-cli_amd64.deb

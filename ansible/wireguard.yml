@@ -1,7 +1,7 @@
 # Stage 5 — WireGuard on the gateway. `make wireguard`
-#   1. on the i5: generate keys once (ansible/.secrets/wireguard, 0600, gitignored) and render
-#      the client configs to build/export/<peer>/wg0.conf (0600). The i7 one is the file to
-#      copy to the client; this repo never touches the i7.
+#   1. on the cloud host: generate keys once (ansible/.secrets/wireguard, 0600, gitignored) and render
+#      the client configs to build/export/<peer>/wg0.conf (0600). The remote client one is the file to
+#      copy to the client; this repo never touches the remote client.
 #   2. on the gateway: wg0 from the generated template, started at boot.
 - name: WireGuard keys and client configs on the CLOUD host
   hosts: localhost
@@ -11,7 +11,7 @@
     wg_names: "{{ [zt_wg.server] + (zt_wg.peers | map(attribute='name') | list) }}"
     wg_peer_names: "{{ zt_wg.peers | map(attribute='name') | list }}"
   tasks:
-    - name: wg is installed on the i5 (stage 1)
+    - name: wg is installed on the cloud host (stage 1)
       ansible.builtin.command: wg --version
       changed_when: false
 
@@ -59,7 +59,7 @@
         mode: "0700"
       loop: "{{ wg_peer_names }}"
 
-    - name: Client config per peer (i7 = the file to export; test-peer = used by tests)
+    - name: Client config per peer (remote-client = the file to export; test-peer = used by tests)
       ansible.builtin.template:
         src: "{{ zt_build }}/wireguard/client-{{ item }}.conf.j2"
         dest: "{{ wg_export }}/{{ item }}/wg0.conf"

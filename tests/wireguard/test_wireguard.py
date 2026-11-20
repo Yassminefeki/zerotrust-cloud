@@ -1,12 +1,12 @@
-"""Stage 5 — WireGuard on the gateway. Run with `make test-5` (on the i5, asks for sudo once).
+"""Stage 5 — WireGuard on the gateway. Run with `make test-5` (on the cloud host, asks for sudo once).
 
-The tunnel client is a network namespace on the i5 ("zt-peer", see tools/zt-test-peer) whose
+The tunnel client is a network namespace on the cloud host ("zt-peer", see tools/zt-test-peer) whose
 ONLY interface is the tunnel, and which routes EVERY policy network into it. So each deny below
 is enforced by the gateway (cryptokey routing + nftables), never by the client's own routes.
 
-What the i5 cannot test: the DNAT on the Wi-Fi interface (a host never receives its own packets
-"from outside"). The DNAT rules are checked in stage 2; the real path is checked from the i7
-(README, "Check from the i7").
+What the cloud host cannot test: the DNAT on the Wi-Fi interface (a host never receives its own packets
+"from outside"). The DNAT rules are checked in stage 2; the real path is checked from the remote client
+(README, "Check from the remote client").
 """
 import json
 import re
@@ -80,8 +80,8 @@ def test_templates_carry_no_key():
 
 
 def test_i7_export(env):
-    """What is produced for each real peer: its wg0.conf, private, least privilege. The i7 dials
-    the i5's mDNS name; a peer living ON the i5 (netns, the stage 12 bot) dials the gateway directly.
+    """What is produced for each real peer: its wg0.conf, private, least privilege. The remote client dials
+    the cloud host's mDNS name; a peer living ON the cloud host (netns, the stage 12 bot) dials the gateway directly.
     Checks are booleans: a failure must never print the file, it holds the peer's keys."""
     real = [p for p in WG["peers"] if not p["test"]]
     for p in real:
@@ -177,7 +177,7 @@ def test_only_frontend_from_tunnel(results):
     ("10.40.0.10", 5432),   # database
     ("10.50.0.10", 9000),   # CA
     ("10.10.0.1", 22),      # the gateway itself, over the tunnel
-    ("10.50.0.1", 3142),    # the i5's apt cache
+    ("10.50.0.1", 3142),    # the cloud host's apt cache
     ("10.20.0.10", 22),     # frontend, other port
 ])
 def test_tunnel_required_denies(peer, dst, port):
@@ -195,14 +195,14 @@ def test_tunnel_drop_logged_on_gateway(peer, gw):
 
 # ----------------------------------------------- impersonation attempts --
 def test_spoofed_tunnel_address_dropped(peer):
-    """The test peer uses the i7's tunnel address: the gateway drops it (that /32 belongs to the
-    i7's key only), even toward the one allowed destination."""
-    i7 = next(p for p in WG["peers"] if not p["test"])
-    run(["ip", "-n", peer, "addr", "add", f"{i7['ip']}/32", "dev", DEV], sudo=True, check=True)
+    """The test peer uses the remote client's tunnel address: the gateway drops it (that /32 belongs to the
+    remote-client's key only), even toward the one allowed destination."""
+    rc = next(p for p in WG["peers"] if not p["test"])
+    run(["ip", "-n", peer, "addr", "add", f"{rc['ip']}/32", "dev", DEV], sudo=True, check=True)
     try:
-        assert probe_netns(peer, [[FRONTEND, FRONTEND_PORT]], bind=i7["ip"]) == ["timeout"]
+        assert probe_netns(peer, [[FRONTEND, FRONTEND_PORT]], bind=rc["ip"]) == ["timeout"]
     finally:
-        run(["ip", "-n", peer, "addr", "del", f"{i7['ip']}/32", "dev", DEV], sudo=True)
+        run(["ip", "-n", peer, "addr", "del", f"{rc['ip']}/32", "dev", DEV], sudo=True)
 
 
 ROGUE = r'''
@@ -256,7 +256,7 @@ def test_stolen_private_key_without_psk_gets_nothing(tmp_path):
 
 
 def test_dnat_target_is_the_wireguard_endpoint(zt_host):
-    """The i5's WAN DNAT (stage 1/2) points at the address and port the gateway listens on."""
+    """The cloud host's WAN DNAT (stage 1/2) points at the address and port the gateway listens on."""
     assert {"proto": "udp", "to": f"{WG['endpoint_ip']}:{WG['port']}"} in [
         {"proto": d["proto"], "to": d["to"]} for d in zt_host["dnat"]]
     live = run(["nft", "list", "table", "inet", "zt_host"], sudo=True, check=True).stdout

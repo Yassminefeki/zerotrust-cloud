@@ -6,7 +6,7 @@
 - name: Package lists are fresh
   ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/apt_update.yml"
 
-- name: wireguard-tools (through the apt cache on the i5)
+- name: wireguard-tools (through the apt cache on the cloud host)
   ansible.builtin.apt:
     name: wireguard-tools
     lock_timeout: 600

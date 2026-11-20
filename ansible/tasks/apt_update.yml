@@ -1,5 +1,5 @@
-# Refresh the package lists through the apt cache on the i5, patiently. On a fresh VM apt needs
-# new index files; the i5 fetches them from Ubuntu over its (possibly slow) Wi-Fi, and
+# Refresh the package lists through the apt cache on the cloud host, patiently. On a fresh VM apt needs
+# new index files; the cloud host fetches them from Ubuntu over its (possibly slow) Wi-Fi, and
 # apt-cacher-ng may answer 503 meanwhile. The apt module's own retries give up after ~30 s.
 - name: Refresh package lists (retries for a slow uplink; apt's real error is shown on failure)
   ansible.builtin.command: apt-get update -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600

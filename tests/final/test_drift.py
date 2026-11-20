@@ -2,8 +2,8 @@
 
 1. build/ is up to date with policy.yaml + env.yaml (regenerated in memory and compared);
 2. every live config generated from the policy is byte-identical on its machine
-   (nftables on every VM and the i5, mtls.json, pg_hba/pg_ident, WireGuard peers, CA policy);
-3. the full N x N matrix — every source (6 VMs, the i5, a tunnel client) x every address of
+   (nftables on every VM and the cloud host, mtls.json, pg_hba/pg_ident, WireGuard peers, CA policy);
+3. the full N x N matrix — every source (6 VMs, the cloud host, a tunnel client) x every address of
    every VM x every policy port — is probed for real, and the set of reachable pairs must be
    EXACTLY the set of declared flows. A report is written to build/drift-report.json.
 """
@@ -96,7 +96,7 @@ def test_ca_issuance_policy_is_the_policy(vm):
 
 # ----------------------------------------------------------- N x N matrix --
 def _host_attached(policy):
-    """Networks where the i5 itself has an address. Other destinations would leave through its
+    """Networks where the cloud host itself has an address. Other destinations would leave through its
     default route (Wi-Fi) and probe someone else's network instead of ours."""
     import ipaddress
     return [ipaddress.ip_network(s["cidr"]) for s in policy["networks"].values() if s.get("host_ip")]

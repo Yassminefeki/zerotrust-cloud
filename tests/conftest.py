@@ -1,4 +1,4 @@
-"""Shared fixtures for live tests (run on the i5). Read env.yaml + build/ — never hard-code IPs."""
+"""Shared fixtures for live tests (run on the cloud host). Read env.yaml + build/ — never hard-code IPs."""
 import json
 
 import pytest

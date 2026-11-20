@@ -9,7 +9,7 @@
     state: directory
     mode: "0755"
 
-- name: Copy step packages (downloaded on the i5; the VM has no internet)
+- name: Copy step packages (downloaded on the cloud host; the VM has no internet)
   ansible.builtin.copy:
     src: "{{ zt_artifacts }}/{{ item }}"
     dest: "/var/cache/zerotrust/{{ item }}"
@@ -46,7 +46,7 @@
     mode: "0700"
   loop: ["{{ step_path }}", "{{ step_path }}/secrets"]
 
-- name: Key and provisioner passwords (generated on the i5, 0400 here)
+- name: Key and provisioner passwords (generated on the cloud host, 0400 here)
   ansible.builtin.copy:
     content: "{{ lookup('ansible.builtin.file', zt_secrets ~ '/' ~ item.src) }}"
     dest: "{{ step_path }}/secrets/{{ item.dest }}"
@@ -150,7 +150,7 @@
     timeout: 60
   tags: [clients]        # also for `make client-certs`: a new actor's name must reach the CA first
 
-# --------------------------------------------- export the trust anchor to i5 --
+# --------------------------------------------- export the trust anchor to cloud-host --
 - name: Root certificate fingerprint
   ansible.builtin.command:
     argv: ["{{ ca_step_bin.stdout }}", certificate, fingerprint, "{{ step_path }}/certs/root_ca.crt"]

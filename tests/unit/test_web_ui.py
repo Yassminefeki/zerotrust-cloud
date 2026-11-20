@@ -104,7 +104,7 @@ def browser(bank):
     if sync_api is None:
         pytest.skip("Playwright not installed (pip install playwright; playwright install chromium)")
     # Playwright presents client certificates through its own TLS client (Node): it must trust
-    # the bank's root, exactly like Firefox once the root is imported on the i7
+    # the bank's root, exactly like Firefox once the root is imported on the remote client
     saved = dict(os.environ)
     os.environ["NODE_EXTRA_CA_CERTS"] = str(bank["dir"] / "root.crt")
     # and it would send that traffic through an outbound proxy if one is set (it does not

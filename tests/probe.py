@@ -1,4 +1,4 @@
-"""TCP reachability probes, run FROM a source (a VM over SSH, or the i5 itself).
+"""TCP reachability probes, run FROM a source (a VM over SSH, or the cloud host itself).
 
 Verdicts, as seen by the kernel of the source:
   open     - TCP handshake completed (a service is listening and the path is allowed)
@@ -66,7 +66,7 @@ def probe_from(host, targets, timeout=TIMEOUT):
 
 
 def probe_netns(ns, targets, timeout=TIMEOUT, bind=None):
-    """Run the probe inside a network namespace on the i5 (needs `sudo -v` first).
+    """Run the probe inside a network namespace on the cloud host (needs `sudo -v` first).
     bind: source address to use (to try spoofing another tunnel client's address)."""
     if not targets:
         return []

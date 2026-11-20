@@ -1,4 +1,4 @@
-# Load the WireGuard keys generated on the i5 into `wg_keys` (lookups always run on the i5).
+# Load the WireGuard keys generated on the cloud host into `wg_keys` (lookups always run on the cloud host).
 # wg_keys[name] = {private, public, psk}; psk is per peer (empty for the server).
 - name: Load WireGuard keys (secret, not logged)
   ansible.builtin.set_fact:

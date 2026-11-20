@@ -1,7 +1,7 @@
 """Stage 12 offline: the partner webhook (signature, time window, anti-replay), the rate limit per
 identity and the device binding, on the real services + PostgreSQL of test_bank_app.py.
 
-The partner side is tools/payflow.py itself (the program a partner, or the i7, runs).
+The partner side is tools/payflow.py itself (the program a partner, or the remote client, runs).
 """
 import json
 import re

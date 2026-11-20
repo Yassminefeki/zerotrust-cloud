@@ -48,12 +48,12 @@ def test_default_drop_and_log_on_every_chain(build, node):
 
 @pytest.mark.parametrize("node", NODES)
 def test_ssh_only_from_host_on_mgmt(build, node):
-    """Lock-out guard: SSH from the i5 over mgmt is always allowed, and only that."""
+    """Lock-out guard: SSH from the cloud host over mgmt is always allowed, and only that."""
     text = nft(build, node)
     ssh = [l for l in text.splitlines() if "dport 22 " in l]
     assert len(ssh) == 1
     assert 'iifname "mgmt0" ip saddr 10.50.0.1/32' in ssh[0]
-    # replies to the i5 survive a first ruleset load over an already-open (untracked) session
+    # replies to the cloud host survive a first ruleset load over an already-open (untracked) session
     replies = [l.strip() for l in text.splitlines() if "sport 22 " in l]
     ip = next(l for l in text.splitlines() if "dport 22 " in l).split("ip daddr ")[1].split()[0]
     assert replies == [f'oifname "mgmt0" ip saddr {ip} ip daddr 10.50.0.1 tcp sport 22 accept '
@@ -120,7 +120,7 @@ def test_env_change_only_touches_host_and_client_side(policy, env, tmp_path):
                (b / f"nodes/{node}/nftables.conf").read_text()
     hb = (b / "host/nftables-zt.conf").read_text()
     assert 'iifname "enp3s0" udp dport 443 dnat ip to 192.168.122.10:51820' in hb
-    assert "Endpoint = other-host.local:443" in (b / "wireguard/client-i7.conf.j2").read_text()
+    assert "Endpoint = other-host.local:443" in (b / "wireguard/client-remote-client.conf.j2").read_text()
 
 
 # ------------------------------------------------------------------- mTLS --
@@ -156,7 +156,7 @@ def test_wireguard_configs(build, env):
     srv = (build / "wireguard/gateway-wg0.conf.j2").read_text()
     assert "ListenPort = 51820" in srv and "Address = 10.10.0.1/24" in srv
     assert "AllowedIPs = 10.10.0.2/32" in srv and "AllowedIPs = 10.10.0.200/32" in srv
-    cli = (build / "wireguard/client-i7.conf.j2").read_text()
+    cli = (build / "wireguard/client-remote-client.conf.j2").read_text()
     assert f"Endpoint = {env['entry_point']}:{env['wan_port']}" in cli
     assert "AllowedIPs = 10.20.0.10/32" in cli, "client routes only what policy lets it reach"
     for text in (srv, cli):
@@ -186,7 +186,7 @@ def test_wireguard_json(build):
     wg = json.loads((build / "wireguard/wireguard.json").read_text())
     assert wg["server"] == "gateway" and wg["iface"] == "wg0" and wg["port"] == 51820
     assert wg["address"] == "10.10.0.1/24" and wg["endpoint_ip"] == "192.168.122.10"
-    assert [(p["name"], p["test"]) for p in wg["peers"]] == [("i7", False), ("bot", False), ("test-peer", True)]
+    assert [(p["name"], p["test"]) for p in wg["peers"]] == [("remote-client", False), ("bot", False), ("test-peer", True)]
     assert wg["peers"][1]["netns"] == "zt-bot" and wg["peers"][1]["conn_limit"] == "5/second"
     assert wg["reachable"] == ["10.20.0.10/32"]
 
@@ -202,7 +202,7 @@ def test_test_peer_template_independent_of_env(policy, env, tmp_path):
 
 @pytest.mark.parametrize("peers,msg", [
     ([{"name": "only-test", "ip": "10.10.0.9", "test": True}], "at least one real"),
-    ([{"name": "i7", "ip": "10.10.0.2", "test": "yes"}], "test must be true/false"),
+    ([{"name": "remote-client", "ip": "10.10.0.2", "test": "yes"}], "test must be true/false"),
     ([{"name": "Bad_Name", "ip": "10.10.0.2"}], "lowercase DNS label"),
 ])
 def test_bad_wireguard_peers_rejected(policy, peers, msg):
@@ -360,7 +360,7 @@ def test_pki_identities_and_ca_policy(build):
     assert ids["service-b"]["ips"] == ["10.30.0.12", "10.40.0.11"], "data-plane IPs only, no mgmt"
     a = ids["customer-alice"]
     assert (a["uri"], a["ips"], a["role"], a["actor"], a["export_to"], a["lifetime"]) == (
-        "spiffe://cloud.local/customer/alice", [], "customer", "alice", "i7", "24h")
+        "spiffe://cloud.local/customer/alice", [], "customer", "alice", "remote-client", "24h")
     assert ids["bot-statements"]["lifetime"] == "1h", "the bot gets a short-lived certificate"
     assert "export_to" not in ids["customer-bob"], "test actors are never exported"
     allow = pki["x509_policy"]["allow"]

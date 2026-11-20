@@ -37,7 +37,7 @@
   delegate_to: "{{ zt_pki.ca.node }}"
   become: true
 
-- name: "{{ item.item.key }}: certificate back to the i5"
+- name: "{{ item.item.key }}: certificate back to the cloud host"
   ansible.builtin.fetch:
     src: "/tmp/zt-{{ item.item.key }}.crt"
     dest: "{{ pki_secrets }}/{{ item.item.key }}/client.crt"

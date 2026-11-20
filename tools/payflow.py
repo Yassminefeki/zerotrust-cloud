@@ -13,7 +13,7 @@ Attack modes, to see the bank refuse them:
   --skew SECONDS    sign with a timestamp SECONDS away from now (stale or future)
   --tamper          change the amount after signing (man in the middle)
   --wrong-secret    sign with a secret that is not the partner's
-Defaults read the i5's files (build/, ansible/.secrets); on another machine pass every path.
+Defaults read the cloud host's files (build/, ansible/.secrets); on another machine pass every path.
 Standard library only.
 """
 import argparse
@@ -73,7 +73,7 @@ def send(host, port, ctx, body, headers, path="/webhook", expect=f"{TRUST_DOMAIN
 
 
 def default_url():
-    """From the i5: the gateway's published address (build/host/host.json)."""
+    """From the cloud host: the gateway's published address (build/host/host.json)."""
     try:
         h = json.loads((ROOT / "build/host/host.json").read_text())
         return "https://" + next(d["to"] for d in h["dnat"] if d["flow"] == "partner-webhook") + "/webhook"
@@ -84,7 +84,7 @@ def default_url():
 def main(argv=None):
     sec = ROOT / "ansible/.secrets"
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", default=default_url(), help="https://HOST:PORT/webhook (i7: https://cloud-i5.local:8444/webhook)")
+    ap.add_argument("--url", default=default_url(), help="https://HOST:PORT/webhook (remote-client: https://cloud-host.local:8444/webhook)")
     ap.add_argument("--partner", default="payflow")
     ap.add_argument("--cert"), ap.add_argument("--key"), ap.add_argument("--secret-file")
     ap.add_argument("--ca", default=str(ROOT / "build/pki/root_ca.crt"))

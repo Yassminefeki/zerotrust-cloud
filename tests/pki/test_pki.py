@@ -1,4 +1,4 @@
-"""Stage 6 — workload and client certificates. Run with `make test-6` (on the i5).
+"""Stage 6 — workload and client certificates. Run with `make test-6` (on the cloud host).
 
 Expected identities come from build/pki/pki.json (generated from policy.yaml)."""
 import json
@@ -160,7 +160,7 @@ def test_client_certificates(client):
     assert v.returncode == 0, v.stderr
     key_pub = run(["openssl", "pkey", "-in", str(d / "client.key"), "-pubout"], check=True).stdout
     crt_pub = run(["openssl", "x509", "-in", str(d / "client.crt"), "-noout", "-pubkey"], check=True).stdout
-    assert key_pub == crt_pub, "the certificate is for the key generated on the i5"
+    assert key_pub == crt_pub, "the certificate is for the key generated on the cloud host"
 
 
 def test_client_secrets_never_tracked():
@@ -174,7 +174,7 @@ def test_client_secrets_never_tracked():
 def test_actor_identities_exported_to_their_machine():
     """build/export/<peer>/<actor>/: only the actors whose `export_to` names that machine."""
     exported = {(i["export_to"], i["actor"]): cn for cn, i in PKI["identities"].items() if i.get("export_to")}
-    assert exported, "at least one actor is exported (alice and dev to the i7)"
+    assert exported, "at least one actor is exported (alice and dev to the remote client)"
     for (peer, actor), cn in exported.items():
         d = BUILD / "export" / peer / actor
         for f in ("client.crt", "client.key", "root_ca.crt"):
@@ -184,4 +184,4 @@ def test_actor_identities_exported_to_their_machine():
         for sub in peer_dir.iterdir():
             if sub.is_dir():
                 assert (peer_dir.name, sub.name) in exported, f"{sub} is not declared in the policy"
-    assert not (BUILD / "export/i7/client.key").exists(), "old single-identity export removed"
+    assert not (BUILD / "export/remote-client/client.key").exists(), "old single-identity export removed"

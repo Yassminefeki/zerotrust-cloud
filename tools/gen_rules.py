@@ -10,7 +10,7 @@ Outputs (under --out, default build/; the directory is gitignored):
   nodes/database/pg_hba.conf     PostgreSQL access, derived from the service-b->database flow
   host/nftables-zt.conf          host-side DNAT (by interface NAME) + mgmt accepts
   wireguard/gateway-wg0.conf.j2  server config (Jinja: keys injected by Ansible)
-  wireguard/client-<peer>.conf.j2  client config templates (i7 export, test-peer)
+  wireguard/client-<peer>.conf.j2  client config templates (remote-client export, test-peer)
   terraform.tfvars.json          networks + VMs for Terraform (IPs, MACs, memory, routes)
   inventory.yml                  Ansible inventory (mgmt addresses)
   matrix.json                    NxN probe matrix with the expected verdict per pair
@@ -70,7 +70,7 @@ def validate_env(env: dict) -> list[str]:
     ep = str(env.get("entry_point", ""))
     try:
         ipaddress.ip_address(ep)
-        errs.append(f"env: entry_point must be a hostname (e.g. cloud-i5.local), not an IP ('{ep}')")
+        errs.append(f"env: entry_point must be a hostname (e.g. cloud-host.local), not an IP ('{ep}')")
     except ValueError:
         if ep and not HOSTNAME_RE.match(ep):
             errs.append(f"env: entry_point '{ep}' is not a valid hostname")
@@ -558,13 +558,13 @@ def render_node_nft(policy: dict, node: str, rules: list[Rule]) -> str:
 
 
 def entry_target(r: Rule) -> tuple[str, int]:
-    """Where the i5 forwards an internet flow: the VM that receives it on the NAT network
+    """Where the cloud host forwards an internet flow: the VM that receives it on the NAT network
     (the gateway itself for WireGuard, the gateway's published address for the partner API)."""
     return (r.published or r.dst.addr), r.port
 
 
 def wan_port(env: dict, r: Rule) -> int:
-    """Port on the i5's WAN interface: env wan_port for WireGuard (the i7's config uses it),
+    """Port on the cloud host's WAN interface: env wan_port for WireGuard (the remote client's config uses it),
     the service port for published services."""
     return int(env["wan_port"]) if r.proto == "udp" else r.port
 
@@ -574,7 +574,7 @@ def render_host_nft(policy: dict, env: dict, rules: list[Rule]) -> str:
     nets = policy["networks"]
     wg = [r for r in rules if r.src.name == "internet"]
     lines = [GENERATED_HEADER.rstrip(),
-             "# Host (i5) rules. Matches the WAN side by interface NAME, never by IP,",
+             "# Cloud host rules. Matches the WAN side by interface NAME, never by IP,",
              "# so changing Wi-Fi network needs no change here.",
              "table inet zt_host",
              "delete table inet zt_host", "",
@@ -754,7 +754,7 @@ def render_pg_ident(policy: dict, rules: list[Rule]) -> str:
 def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
     """Server config, one client template per peer, and wireguard.json for Ansible/tests.
     Keys are NEVER here: the templates carry Jinja placeholders that Ansible fills from
-    ansible/.secrets/wireguard (generated on the i5, mode 0600, gitignored)."""
+    ansible/.secrets/wireguard (generated on the cloud host, mode 0600, gitignored)."""
     nets = policy["networks"]
     gw = next(n for n, s in policy["nodes"].items() if "tunnel" in s["interfaces"])
     gw_ifs = policy["nodes"][gw]["interfaces"]
@@ -783,12 +783,12 @@ def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
             endpoint = f"{gw_ifs[wg_svc['network']]}:{port}"   # direct, on the libvirt NAT network
             allowed = everything
         elif peer.get("netns"):
-            # lives on the i5 itself (a host cannot DNAT its own Wi-Fi traffic): direct endpoint,
+            # lives on the cloud host itself (a host cannot DNAT its own Wi-Fi traffic): direct endpoint,
             # but a REAL client: it routes only what the policy lets the tunnel reach
             endpoint = f"{gw_ifs[wg_svc['network']]}:{port}"
             allowed = reachable
         else:
-            endpoint = f"{env['entry_point']}:{int(env['wan_port'])}"   # DNAT on the i5's WAN NIC
+            endpoint = f"{env['entry_point']}:{int(env['wan_port'])}"   # DNAT on the cloud host's WAN NIC
             allowed = reachable
         cli = [GENERATED_HEADER.rstrip(), f"# client: {peer['name']}", "[Interface]",
                f"Address = {peer['ip']}/32",
@@ -812,7 +812,7 @@ def render_wireguard(policy: dict, env: dict) -> dict[str, str]:
 
 
 def client_cn(uri: str) -> str:
-    """spiffe://cloud.local/client/i7 -> client-i7 (CNs must be valid DNS labels for the CA policy)."""
+    """spiffe://cloud.local/client/remote-client -> client-remote-client (CNs must be valid DNS labels for the CA policy)."""
     return uri.split("://", 1)[1].split("/", 1)[1].replace("/", "-")
 
 
@@ -959,7 +959,7 @@ def render_matrix(policy: dict, rules: list[Rule]) -> list[dict]:
     sources = []
     for n, s in policy["nodes"].items():
         sources.append({"name": n, "kind": "node"})
-    # Probe-able principals: test-peer stands in for "tunnel", the i5 for "host".
+    # Probe-able principals: test-peer stands in for "tunnel", the cloud host for "host".
     peers = {p["name"]: p["ip"] for p in policy.get("wireguard", {}).get("peers", [])}
     if "tunnel" in policy["principals"] and "test-peer" in peers:
         sources.append({"name": "tunnel", "kind": "principal", "probe_ip": peers["test-peer"]})

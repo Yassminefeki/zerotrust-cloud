@@ -1,9 +1,9 @@
-"""Stage 4 — default-drop nftables on every VM. Run with `make test-4` (on the i5).
+"""Stage 4 — default-drop nftables on every VM. Run with `make test-4` (on the cloud host).
 
 Two kinds of checks:
   * the live ruleset on each VM is exactly the generated one (policies, accepts, logging)
   * real TCP probes for every (source, destination, port) of build/matrix.json that is
-    testable now: VMs and the i5 as sources (the tunnel arrives in stage 5).
+    testable now: VMs and the cloud host as sources (the tunnel arrives in stage 5).
 """
 import ipaddress
 import json
@@ -81,7 +81,7 @@ def test_persistent_and_no_pending_rollback(vm, name):
 @pytest.mark.parametrize("name", NODES)
 def test_admin_ssh_replies_survive_conntrack_loss(vm, name):
     """Anti lock-out: even with conntrack state flushed (as on the very first ruleset load),
-    the VM's SSH replies to the i5 are accepted, so the running session is not cut."""
+    the VM's SSH replies to the cloud host are accepted, so the running session is not cut."""
     h = vm(name)
     # conntrack -F would cut nothing here; the rule itself is what matters
     rule = [l for l in h.check_output("nft list chain inet zt output").splitlines() if "sport 22" in l]
@@ -90,8 +90,8 @@ def test_admin_ssh_replies_survive_conntrack_loss(vm, name):
 
 # ---------------------------------------------------------------- probes --
 def _testable(entry):
-    """TCP probes we can run now: from VMs, and from the i5 towards mgmt addresses only
-    (the i5 has no address on dmz/app/data; probing them would just leak SYNs to the LAN)."""
+    """TCP probes we can run now: from VMs, and from the cloud host towards mgmt addresses only
+    (the cloud host has no address on dmz/app/data; probing them would just leak SYNs to the LAN)."""
     if entry["proto"] != "tcp":
         return False
     if entry["src_kind"] == "node":
@@ -136,15 +136,15 @@ def test_matrix(results, entry):
     ("service-a", "10.40.0.10", 5432),   # service-A -> database
     ("frontend", "10.30.0.12", 9443),    # frontend -> service-B
     ("frontend", "10.50.0.30", 22),      # VM -> VM over mgmt
-    ("host", "10.50.0.10", 9000),        # the i5 has SSH only, not the CA
+    ("host", "10.50.0.10", 9000),        # the cloud host has SSH only, not the CA
 ])
 def test_required_denies(results, src, dst_ip, port):
     assert not is_reachable(results[(src, dst_ip, port)])
 
 
 def test_denied_is_a_silent_drop(results):
-    """A deny is a DROP, never a reject: the i5 -> CA:9000 SYN is dropped by the CA's input
-    chain, so the i5 sees a timeout (a reject would answer and leak that something is there).
+    """A deny is a DROP, never a reject: the cloud host -> CA:9000 SYN is dropped by the CA's input
+    chain, so the cloud host sees a timeout (a reject would answer and leak that something is there).
     For VM sources the drop usually happens earlier, on their own output chain."""
     assert results[("host", "10.50.0.10", 9000)] == "timeout"
     assert results[("frontend", "10.30.0.12", 9443)] != "refused"

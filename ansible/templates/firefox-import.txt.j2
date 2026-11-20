@@ -33,7 +33,7 @@ one Firefox profile per identity:   firefox -P      (create "zt-alice", "zt-dev"
 
 Your certificate lives {{ item.value.lifetime }}. When it expires the bank refuses the handshake
 (Firefox: "SSL_ERROR_EXPIRED_CERT_ALERT" or "connection reset"): get the new {{ item.value.actor }}.p12 from the
-cloud admin (`make client-certs` on the i5), delete the old one in Your Certificates, import the new one.
+cloud admin (`make client-certs` on the cloud host), delete the old one in Your Certificates, import the new one.
 The root and the password stay the same.
 
 What you will see: {% if item.value.role == 'customer' %}your accounts, their history, and a transfer form (limits:

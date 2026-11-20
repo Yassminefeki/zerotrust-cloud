@@ -44,7 +44,7 @@ def actor_identity(actor):
 
 
 def actor_creds(actor):
-    """(cert, key) of an actor; every client key is generated on the i5 (ansible/.secrets/pki)."""
+    """(cert, key) of an actor; every client key is generated on the cloud host (ansible/.secrets/pki)."""
     d = ROOT / "ansible/.secrets/pki" / actor_identity(actor)["cn"]
     return d / "client.crt", d / "client.key"
 

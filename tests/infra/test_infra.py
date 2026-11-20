@@ -1,4 +1,4 @@
-"""Stage 2 — libvirt networks and the 6 VMs match policy.yaml. Run with `make test-2` (on the i5).
+"""Stage 2 — libvirt networks and the 6 VMs match policy.yaml. Run with `make test-2` (on the cloud host).
 
 Everything expected is read from build/terraform.tfvars.json (generated from policy.yaml):
 no IP is written in this file."""

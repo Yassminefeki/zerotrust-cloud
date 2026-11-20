@@ -1,4 +1,4 @@
-# zerotrust-cloud — run everything from the i5 (CLOUD host).
+# zerotrust-cloud — run everything from the cloud host (CLOUD host).
 SHELL   := /bin/bash
 .ONESHELL:
 # with .ONESHELL a recipe is ONE script: stop at the first failing line
@@ -46,7 +46,7 @@ test-0: venv  ## stage 0: offline tests of the policy and the generator
 galaxy:  ## install the Ansible collections (user level, no sudo)
 	$(ANSIBLE) ansible-galaxy collection install -r requirements.yml
 
-host: gen galaxy  ## stage 1: prepare the i5 (asks for your sudo password)
+host: gen galaxy  ## stage 1: prepare the cloud host (asks for your sudo password)
 	$(ANSIBLE) ansible-playbook host.yml --ask-become-pass
 
 test-1: venv gen  ## stage 1: host preflight tests (asks for sudo once)
@@ -83,7 +83,7 @@ test-2: venv gen  ## stage 2: networks, VMs, IPs, routes, isolation, apt cache
 	$(PYTEST) tests/infra -v
 
 # ---------------------------------------------------------------- stage 3 --
-ca: gen  ## stage 3: step-ca on the CA VM (downloads step packages once on the i5)
+ca: gen  ## stage 3: step-ca on the CA VM (downloads step packages once on the cloud host)
 	$(ANSIBLE) ansible-playbook ca.yml
 
 test-3: venv gen  ## stage 3: CA service, TLS 1.3, policy, 24h issuance, refusals
@@ -97,11 +97,11 @@ test-4: venv gen  ## stage 4: live rulesets = generated, NxN TCP probes, drop lo
 	$(PYTEST) tests/firewall -v
 
 # ---------------------------------------------------------------- stage 5 --
-wireguard: gen  ## stage 5: keys (on the i5, never committed), wg0 on the gateway, client exports
+wireguard: gen  ## stage 5: keys (on the cloud host, never committed), wg0 on the gateway, client exports
 	$(ANSIBLE) ansible-playbook wireguard.yml
-	@echo ">> i7 client config: $(BUILD)/export/i7/wg0.conf (copy it to the i7 as /etc/wireguard/wg0.conf)"
+	@echo ">> remote-client client config: $(BUILD)/export/remote-client/wg0.conf (copy it to the remote client as /etc/wireguard/wg0.conf)"
 
-test-peer: venv  ## (re)start the tunnel test client: netns zt-peer on the i5 (sudo)
+test-peer: venv  ## (re)start the tunnel test client: netns zt-peer on the cloud host (sudo)
 	sudo tools/zt-test-peer up $(BUILD)/export/test-peer/wg0.conf
 
 test-peer-down:  ## remove the tunnel test client
@@ -145,7 +145,7 @@ test-10: venv gen client-certs  ## stage 10: ZT Bank live: accounts, IDOR, trans
 	$(PYTEST) tests/bank -v
 
 # --------------------------------------------------------------- stage 11 --
-test-11: venv gen client-certs  ## stage 11: website live, CSRF refusals, Firefox bundles for the i7
+test-11: venv gen client-certs  ## stage 11: website live, CSRF refusals, Firefox bundles for the remote client
 	sudo -v
 	$(PYTEST) tests/web -v
 
@@ -153,7 +153,7 @@ test-11: venv gen client-certs  ## stage 11: website live, CSRF refusals, Firefo
 BOT_CN   := bot-statements
 BOT_URL   = $(shell python3 -c "import json; print(json.load(open('$(BUILD)/pki/pki.json'))['identities']['$(BOT_CN)']['web_url'])")
 
-bot: venv gen  ## stage 12: the statements bot's own namespace on the i5 (zt-bot: its WireGuard peer only)
+bot: venv gen  ## stage 12: the statements bot's own namespace on the cloud host (zt-bot: its WireGuard peer only)
 	sudo tools/zt-test-peer up $(BUILD)/export/bot/wg0.conf zt-bot
 
 bot-down:  ## remove the bot's namespace

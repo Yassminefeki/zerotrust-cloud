@@ -1,11 +1,11 @@
-"""Stage 12 — the edges of the bank, live. Run with `make test-12` (on the i5).
+"""Stage 12 — the edges of the bank, live. Run with `make test-12` (on the cloud host).
 
 The statements bot: its own network namespace (zt-bot) whose only way out is its own WireGuard
 peer; its certificate is bound to that device; the frontend limits each identity's request rate
 and the gateway limits the bot's connection rate.
 
-The payment partner PayFlow: calls the webhook from OUTSIDE, without the VPN (from the i5's own
-namespace, through the gateway's published port: the same path as from the Wi-Fi after the i5's
+The payment partner PayFlow: calls the webhook from OUTSIDE, without the VPN (from the cloud host's own
+namespace, through the gateway's published port: the same path as from the Wi-Fi after the cloud host's
 port forwarding, which is checked separately). Signed, time-boxed, each request accepted once.
 """
 import json
@@ -144,7 +144,7 @@ def test_gateway_limits_the_bots_connection_bursts(bot, peer, vm):
 
 # ---------------------------------------------------------------------------- the partner --
 def pay(payment=None, *, actor="payflow", secret=None, ts=None, nonce=None, body=None, headers=None):
-    """PayFlow from outside the VPN: the i5 itself, to the gateway's published address."""
+    """PayFlow from outside the VPN: the cloud host itself, to the gateway's published address."""
     secret = secret or bytes.fromhex((SECRETS / "partners/payflow.key").read_text().strip())
     payment = payment or {"reference": f"PF-{uuid.uuid4().hex[:10]}", "to": "ZTB-ALICE-01", "amount": "0.07",
                           "description": "live test"}

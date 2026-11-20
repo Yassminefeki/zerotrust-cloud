@@ -23,7 +23,7 @@ from unit_helpers import ROOT  # noqa: E402
 jinja2 = pytest.importorskip("jinja2")
 
 ALICE = {"key": "customer-alice", "value": {"actor": "alice", "name": "Alice Martin", "role": "customer",
-                                             "uri": f"{TD}/customer/alice", "lifetime": "24h", "export_to": "i7",
+                                             "uri": f"{TD}/customer/alice", "lifetime": "24h", "export_to": "remote-client",
                                              "web_url": "https://10.20.0.10:8443/"}}
 NICK = "ZT Bank - Alice Martin (customer)"
 

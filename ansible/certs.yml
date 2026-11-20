@@ -1,7 +1,7 @@
 # Stage 6 — workload and client certificates. `make certs`
 #   * every node with an mTLS identity (inventory group "pki"): key generated on the VM,
 #     24h certificate from step-ca via a one-time token, hourly renewal timer;
-#   * actors (alice, bob, dev, statements...): key generated on the i5 (ansible/.secrets/pki, 0600),
+#   * actors (alice, bob, dev, statements...): key generated on the cloud host (ansible/.secrets/pki, 0600),
 #     CSR signed by the CA with the actor's lifetime; exported to build/export/<peer>/<actor>/.
 # The CA first: its issuance policy (which names it may sign) is generated from policy.yaml, so a
 # new actor must reach the CA before its certificate is requested. No-op when nothing changed.
@@ -17,7 +17,7 @@
 
 - name: Client certificates for tunnel clients
   # NO `connection: local` here: as a play keyword it would also apply to the tasks delegated
-  # to the CA VM (they would run on the i5 and ask for its sudo password). The implicit
+  # to the CA VM (they would run on the cloud host and ask for its sudo password). The implicit
   # localhost is already local.
   hosts: localhost
   gather_facts: false
@@ -34,7 +34,7 @@
         mode: "0700"
       loop: "{{ [pki_secrets] + (clients | map(attribute='key') | map('regex_replace', '^', pki_secrets ~ '/') | list) }}"
 
-    - name: Client key (EC P-256), generated on the i5, never overwritten
+    - name: Client key (EC P-256), generated on the cloud host, never overwritten
       ansible.builtin.shell: >-
         umask 077 && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256
         -out {{ (pki_secrets ~ '/' ~ item.key ~ '/client.key') | quote }}
@@ -83,8 +83,8 @@
       loop: "{{ clients | product(['client.key', 'client.crt']) | list }}"
       loop_control: {label: "{{ item.0.key }}/{{ item.1 }}"}
 
-    # ----------------------------------------------- browsers (Firefox on the i7, stage 11) --
-    - name: Browser bundle password (random, generated on the i5 once, never committed)
+    # ----------------------------------------------- browsers (Firefox on the remote client, stage 11) --
+    - name: Browser bundle password (random, generated on the cloud host once, never committed)
       ansible.builtin.shell: >-
         f={{ (pki_secrets ~ '/' ~ item.key ~ '/p12.pass') | quote }};
         [ -s "$f" ] || { umask 077 && openssl rand -hex 12 > "$f"; }

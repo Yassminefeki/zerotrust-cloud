@@ -1,4 +1,4 @@
-"""Stage 8a — nobody can sniff the traffic. Run with `make test-8` (on the i5, sudo).
+"""Stage 8a — nobody can sniff the traffic. Run with `make test-8` (on the cloud host, sudo).
 
 tcpdump runs on EVERY libvirt bridge of the policy (virbr-zt-*) while a request carrying a
 random marker crosses the whole chain: tunnel -> frontend -> service-a -> service-b -> database
@@ -69,7 +69,7 @@ def test_capture_works_control_marker_seen(capture):
 
 
 @pytest.mark.parametrize("net,flt", [
-    ("wan", "udp port 51820"),        # WireGuard, i5 <-> gateway
+    ("wan", "udp port 51820"),        # WireGuard, cloud-host <-> gateway
     ("dmz", "tcp port 8443"),         # gateway -> frontend
     ("app", "tcp port 9443"),         # frontend -> service-a -> service-b
     ("data", "tcp port 5432"),        # service-b -> database

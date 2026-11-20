@@ -1,12 +1,20 @@
 # zerotrust-cloud
 
-Cloud side (i5) of a zero-trust mini-cloud: 6 KVM/libvirt VMs where only the
+Cloud side of a zero-trust mini-cloud: 6 KVM/libvirt VMs where only the
 declared caller reaches each service, every hop is encrypted (WireGuard, then
 mTLS with TLS 1.3), and the "who talks to whom" rule is written once in
 `policy.yaml`, generated into enforcement, and tested.
 
+**The two machines** (named by their role in the project):
+
+| name | what it is | what runs there |
+|---|---|---|
+| **cloud host** (`cloud-host`) | the laptop that *is* the cloud: hypervisor of the 6 VMs | everything in this repo: `make up`, `make test`, the automated attacks |
+| **remote client** (`remote-client`) | a separate laptop on the same Wi-Fi: the users' workstation | WireGuard + Firefox for Alice / dev, `remote-client/` attack suite; never managed by this repo |
+
+
 ```
- i7 (client) ──WireGuard──► i5 Wi-Fi (DNAT by interface name) ──► VM1 gateway  wg0 10.10.0.1
+ remote-client (client) ──WireGuard──► cloud-host Wi-Fi (DNAT by interface name) ──► VM1 gateway  wg0 10.10.0.1
                                                                    │ nftables: tunnel → frontend:8443 only
  net-dmz 10.20.0.0/24 ─────────────────────────────────────────────┤
                                                     VM2 frontend 10.20.0.10:8443  (mTLS, TLS 1.3)
@@ -16,7 +24,7 @@ mTLS with TLS 1.3), and the "who talks to whom" rule is written once in
                                                     VM4 service-b 10.30.0.12:9443
  net-data 10.40.0.0/24                                   │ TLS 1.3 + client certificate
                                                     VM5 database 10.40.0.10:5432 (PostgreSQL)
- net-mgmt 10.50.0.0/24  i5 10.50.0.1 (SSH, apt cache) · VM6 ca-internal 10.50.0.10:9000 (step-ca)
+ net-mgmt 10.50.0.0/24  cloud-host 10.50.0.1 (SSH, apt cache) · VM6 ca-internal 10.50.0.10:9000 (step-ca)
 ```
 
 Three independent locks on every hop: the **network** (nftables default-drop on every VM,
@@ -31,7 +39,7 @@ generated from the policy).
 | `policy.yaml` | yes | networks, VMs and their IPs, services, allowed flows, PKI and WireGuard peers. Network-independent. |
 | `env.yaml` | **no** (gitignored) | what depends on *this* machine: `entry_point` (a hostname, never an IP), `wan_interface`, `wan_port`, libvirt pool, SSH user/key. Copy it from `env.example.yaml`. |
 
-Moving the i5 to another Wi-Fi? Nothing changes. Different interface name
+Moving the cloud host to another Wi-Fi? Nothing changes. Different interface name
 (e.g. Ethernet)? Change `wan_interface` in `env.yaml` and re-run `make up`:
 only the host DNAT and the exported client template change; every VM ruleset
 stays byte-identical (this is tested).
@@ -66,17 +74,17 @@ Stage by stage (each `make <stage>` is idempotent, each `test-N` checks it):
 | Stage | Build | Test | What the tests prove |
 |---|---|---|---|
 | 0 | `make gen` | `make test-0` | policy valid, generated rules exact, mTLS service + 4 refusals (offline) |
-| 1 | `make host` | `make test-1` | i5 ready: DNAT by interface name, apt cache, mDNS name resolves |
+| 1 | `make host` | `make test-1` | cloud-host ready: DNAT by interface name, apt cache, mDNS name resolves |
 | 2 | `make infra` | `make test-2` | networks isolated, 6 VMs, exact IPs/routes, nothing routed |
 | 3 | `make ca` | `make test-3` | step-ca: TLS 1.3, 24h max, issues only the policy's identities |
-| 4 | `make firewall` | `make test-4` | default drop everywhere, logged, N×N probes from VMs and the i5 |
+| 4 | `make firewall` | `make test-4` | default drop everywhere, logged, N×N probes from VMs and the cloud host |
 | 5 | `make wireguard` | `make test-5` | handshake, tunnel → frontend:8443 only, impersonation fails |
 | 6 | `make certs` | `make test-6` | SPIFFE certs on every mTLS VM, 24h, renewal timer, single-use tokens |
 | 7 | `make services` | `make test-7` | client → frontend → A → B → DB works; no cert / other CA / unlisted ID / expired refused |
 | 8 | — | `make test-8` | tcpdump: no clear text on any bridge; TLS 1.3 everywhere; drift + full N×N |
 | 9 | `make certs services` | `make test-9` | each actor × each route: allowed, 403 (logged) or 404, exactly as the policy says |
 | 10 | `make services` | `make test-10` | ZT Bank live: own accounts only, IDOR → 404, transfers, replay-safe, RLS + append-only in the real DB, audit |
-| 11 | `make services client-certs` | `make test-11` | the website through the tunnel (strict CSP, repo files, read-only), CSRF refused + logged, Firefox bundles for the i7 |
+| 11 | `make services client-certs` | `make test-11` | the website through the tunnel (strict CSP, repo files, read-only), CSRF refused + logged, Firefox bundles for the remote client |
 | 12 | `make host wireguard firewall services client-certs bot` | `make test-12` | the bot (own netns, device-bound certificate, rate limits) and the partner webhook from outside without VPN (signature, time window, anti-replay) |
 
 The Ubuntu cloud image is downloaded once by `make image` (resumable, checked against
@@ -87,7 +95,7 @@ Other targets: `make destroy` (VMs and networks; host prep stays), `make recreat
 `make test-peer` / `make test-peer-down` (the tunnel test client), `make clean`.
 SSH to any VM over mgmt: `ssh -F build/ssh_config frontend`.
 
-## Host preparation (stage 1) — what `make host` changes on the i5
+## Host preparation (stage 1) — what `make host` changes on the cloud host
 
 | Change | Why |
 |---|---|
@@ -124,7 +132,7 @@ frontend's route back to the tunnel via the gateway.
 step-ca runs on the CA VM, as an unprivileged `step` user under a hardened systemd unit,
 listening **only** on its mgmt address (`10.50.0.10:9000`), **TLS 1.3 only**.
 
-- Packages: downloaded once on the i5 (`build/artifacts/`, VMs have no internet), override
+- Packages: downloaded once on the cloud host (`build/artifacts/`, VMs have no internet), override
   the URLs in `env.yaml` (`step_cli_deb_url`, `step_ca_deb_url`) to pin a version.
 - Secrets: the key password and the JWK provisioner password are random, generated by
   Ansible into `ansible/.secrets/` (0600, gitignored) and copied 0400 to the CA.
@@ -136,7 +144,7 @@ listening **only** on its mgmt address (`10.50.0.10:9000`), **TLS 1.3 only**.
 - Trust anchor: `build/pki/root_ca.crt` + `root_ca.fingerprint` (checked against the CA by the tests).
 
 Identities (SPIFFE ID → SANs) exist only for nodes that take part in an mTLS flow
-(frontend, service-a, service-b, database) and the tunnel clients (`client/i7`, `client/test-peer`).
+(frontend, service-a, service-b, database) and the tunnel clients (`client/remote-client`, `client/test-peer`).
 
 ## Firewall on every VM (stage 4)
 
@@ -146,8 +154,8 @@ rate-limited `log` before every drop (`journalctl -k | grep zt-drop-`). A flow i
 if both ends allow it: the source's output chain and the destination's input chain.
 
 Anti lock-out, three layers:
-1. SSH from the i5 over mgmt is part of the policy (`infra: admin-ssh`, unit-tested on every VM).
-2. `ssh` is the only service with `stateless_replies: true`: the VM may answer the i5 from
+1. SSH from the cloud host over mgmt is part of the policy (`infra: admin-ssh`, unit-tested on every VM).
+2. `ssh` is the only service with `stateless_replies: true`: the VM may answer the cloud host from
    port 22 even without conntrack state. Needed because the Ansible session that loads the
    *first* ruleset was opened before conntrack existed; its next reply is classified `new`
    and would otherwise be dropped (this happened, and was reproduced, before the fix).
@@ -158,44 +166,44 @@ Anti lock-out, three layers:
 
 Tests probe real TCP connections for every source x destination x port of
 `build/matrix.json`: allowed = handshake or RST (nothing listening yet), denied = timeout
-or no route. The i5 has SSH only: it cannot reach the CA, and that is tested too.
+or no route. The cloud host has SSH only: it cannot reach the CA, and that is tested too.
 
 ## WireGuard (stage 5)
 
 `make wireguard`:
-- generates on the i5, once, a key pair per node/peer and a pre-shared key per peer in
+- generates on the cloud host, once, a key pair per node/peer and a pre-shared key per peer in
   `ansible/.secrets/wireguard/` (0600, gitignored, never overwritten);
 - fills `build/wireguard/gateway-wg0.conf.j2` (generated from the policy, keys as Jinja
   placeholders) into `/etc/wireguard/wg0.conf` on the gateway (0600), `wg-quick@wg0` at boot;
 - writes one client config per peer to `build/export/<peer>/wg0.conf` (0600).
 
-**The i7 side is not managed here.** The only thing produced for it is
-`build/export/i7/wg0.conf`: `Endpoint = <entry_point>:<wan_port>` (the mDNS name, never an
+**The remote client side is not managed here.** The only thing produced for it is
+`build/export/remote-client/wg0.conf`: `Endpoint = <entry_point>:<wan_port>` (the mDNS name, never an
 IP), `AllowedIPs = 10.20.0.10/32` (only what the policy lets the tunnel reach). Copy it to the
-i7 over a trusted channel (USB stick, `scp`), as `/etc/wireguard/wg0.conf`, then delete the copy.
+remote-client over a trusted channel (USB stick, `scp`), as `/etc/wireguard/wg0.conf`, then delete the copy.
 
-Path of a packet from the i7: Wi-Fi → i5 `wan_interface` → DNAT (matched by interface name) →
+Path of a packet from the remote client: Wi-Fi → cloud-host `wan_interface` → DNAT (matched by interface name) →
 `192.168.122.10:51820` → gateway `wg0` → nftables forward allows **only** `frontend:8443` →
 frontend, which sees the real tunnel address (no NAT on the gateway).
 
-**Test peer.** `tools/zt-test-peer` builds a network namespace `zt-peer` on the i5 whose only
-interface is a tunnel to the gateway (10.10.0.200). Unlike the i7 it routes *every* policy
+**Test peer.** `tools/zt-test-peer` builds a network namespace `zt-peer` on the cloud host whose only
+interface is a tunnel to the gateway (10.10.0.200). Unlike the remote client it routes *every* policy
 network into the tunnel, so each refusal is proven by the gateway, not by the client's routes.
 It talks to the gateway directly on the NAT network: a machine cannot send its own traffic in
-through its own Wi-Fi card, so the DNAT itself is checked from the i7 (below).
+through its own Wi-Fi card, so the DNAT itself is checked from the remote client (below).
 
-Tests also try to impersonate: the i7's tunnel address from the test peer's key (dropped:
+Tests also try to impersonate: the remote client's tunnel address from the test peer's key (dropped:
 each key owns its /32), an unknown key, and the test peer's private key without its PSK
 (no handshake, no answer).
 
-### Check from the i7 (manual, once)
+### Check from the remote client (manual, once)
 
 ```bash
 sudo wg-quick up wg0
 sudo wg show wg0 latest-handshakes        # a recent timestamp
 nc -vz -w 3 10.20.0.10 8443               # succeeded / refused = reachable (service comes in stage 7)
 ```
-On the i5, `ssh -F build/ssh_config gateway sudo wg show wg0 endpoints` lists the i7's own LAN
+On the cloud host, `ssh -F build/ssh_config gateway sudo wg show wg0 endpoints` lists the remote client's own LAN
 address for its key: the packets came in through the DNAT, unmasqueraded.
 
 ## Certificates (stage 6)
@@ -210,10 +218,10 @@ address for its key: the packets came in through the DNAT, unmasqueraded.
   once less than **8h** is left, then reloads the service. Renewal after expiry is disabled on
   the CA: a VM switched off for more than 24h is re-enrolled by `make certs`.
 
-Tunnel clients (`client/i7`, `client/test-peer`): key generated on the i5
-(`ansible/.secrets/pki/`, 0600), only the CSR goes to the CA. The i7 copy is exported to
-`build/export/i7/` (`client.crt`, `client.key`, `root_ca.crt`) next to its `wg0.conf`.
-It also lives 24h: run `make certs` and copy it again before using the i7.
+Tunnel clients (`client/remote-client`, `client/test-peer`): key generated on the cloud host
+(`ansible/.secrets/pki/`, 0600), only the CSR goes to the CA. The remote client copy is exported to
+`build/export/remote-client/` (`client.crt`, `client.key`, `root_ca.crt`) next to its `wg0.conf`.
+It also lives 24h: run `make certs` and copy it again before using the remote client.
 
 ## Services (stage 7)
 
@@ -230,7 +238,7 @@ It also lives 24h: run `make certs` and copy it again before using the i7.
 - `GET https://10.20.0.10:8443/chain?marker=x` walks the whole chain and returns what every hop
   saw (caller identity, TLS version, the database's `current_user` and client DN).
 
-From the i7, once the tunnel is up:
+From the remote client, once the tunnel is up:
 ```bash
 curl --cacert root_ca.crt --cert client.crt --key client.key https://10.20.0.10:8443/chain?marker=hello
 ```
@@ -243,9 +251,9 @@ curl --cacert root_ca.crt --cert client.crt --key client.key https://10.20.0.10:
   works), and each hop's packets (51820/udp, 8443, 9443, 5432) must be present (they were seen,
   encrypted). TLS 1.2 is refused by every server, PostgreSQL included.
 - `tests/final/test_drift.py`: `build/` equals a fresh generation from `policy.yaml`; every live
-  config generated from it is identical on its machine (nftables on the 6 VMs and the i5,
+  config generated from it is identical on its machine (nftables on the 6 VMs and the cloud host,
   `mtls.json`, `pg_hba`/`pg_ident`, WireGuard peers, CA issuance policy); and the **full N×N
-  matrix** (6 VMs + the i5 + a tunnel client × every address × every policy port) is probed:
+  matrix** (6 VMs + the cloud host + a tunnel client × every address × every policy port) is probed:
   the reachable set must be *exactly* the declared flows, every declared flow must hit a live
   service, and no deny may answer. Report: `build/drift-report.json`.
 
@@ -263,7 +271,7 @@ allowlists, `pg_hba` and the expected matrix together, so the tests follow the c
 | mTLS refused | `ssh -F build/ssh_config <vm> sudo journalctl -u zt-mtls \| grep refused` |
 | certificate expired (VM was off > 24h) | `make certs` |
 | firewall change locked SSH out | wait 2 min: the VM rolls back by itself; `make firewall` reports it |
-| i7 tunnel does not come up | `avahi-resolve -4 -n <entry_point>` on the i7; `sudo wg show` on both ends |
+| remote-client tunnel does not come up | `avahi-resolve -4 -n <entry_point>` on the remote client; `sudo wg show` on both ends |
 | database refuses | `ssh -F build/ssh_config database sudo journalctl -u postgresql@*` |
 
 ## Actors and per-route permissions (stage 9)
@@ -273,17 +281,17 @@ The cloud now runs **ZT Bank**. `policy.yaml` declares *who* uses it (`actors`, 
 
 | Actor | Identity | Role | May (frontend) | Machine |
 |---|---|---|---|---|
-| alice | `spiffe://cloud.local/customer/alice` | customer | her accounts, history, transfers | i7 (`build/export/i7/alice/`) |
-| bob | `spiffe://cloud.local/customer/bob` | customer | same, for his own money | test client on the i5 |
-| dev | `spiffe://cloud.local/staff/dev` | staff | `/api/status`, `/health`, `/chain` — never customer data | i7 (`build/export/i7/dev/`) |
-| statements | `spiffe://cloud.local/bot/statements` | bot | `/api/statements`, `/health`; **1 h** certificate | test client on the i5 |
+| alice | `spiffe://cloud.local/customer/alice` | customer | her accounts, history, transfers | remote-client (`build/export/remote-client/alice/`) |
+| bob | `spiffe://cloud.local/customer/bob` | customer | same, for his own money | test client on the cloud host |
+| dev | `spiffe://cloud.local/staff/dev` | staff | `/api/status`, `/health`, `/chain` — never customer data | remote-client (`build/export/remote-client/dev/`) |
+| statements | `spiffe://cloud.local/bot/statements` | bot | `/api/statements`, `/health`; **1 h** certificate | test client on the cloud host |
 
 The generator turns the routes into each service's `mtls.json`; `zt-mtls` then answers
 **404** to a method + path the policy does not declare, **403** to a declared route that is not
 open to the caller (logged with the caller's identity), and serves the rest. Inner services only
 accept their upstream node, and only on their own declared routes.
 
-Same machine, different rights: Alice and Dev both work from the i7, through the same tunnel;
+Same machine, different rights: Alice and Dev both work from the remote client, through the same tunnel;
 their certificates, not the network, decide what they can do.
 
 Client certificates are re-issued by `make client-certs` (also run before tests 6–9) when less
@@ -329,7 +337,7 @@ Offline, `tests/unit/test_bank_sql.py` and `tests/unit/test_bank_app.py` run the
 whole chain (real programs, generated routes, PostgreSQL with certificate authentication) when
 PostgreSQL is installed (`ZT_TEST_PG_DSN` / `ZT_TEST_PG_RUNAS`, see the files); otherwise skipped.
 
-## The website, and Firefox on the i7 (stage 11)
+## The website, and Firefox on the remote client (stage 11)
 
 | customer (alice) | staff (dev) | bot (statements) |
 |---|---|---|
@@ -352,9 +360,9 @@ returns; every rule stays on the server side.
   pressing *Send* again re-uses it, so the bank pays once.
 - Files are root-owned and read-only for the service user, on the frontend only.
 
-**Firefox on the i7.** `make client-certs` writes, for every actor with `export_to: i7`,
-`build/export/i7/<actor>/`: `<actor>.p12` (key + certificate chain, AES-256, random password
-generated on the i5 in `ansible/.secrets`, never committed), `p12-password.txt`, `root_ca.crt` and
+**Firefox on the remote client.** `make client-certs` writes, for every actor with `export_to: remote-client`,
+`build/export/remote-client/<actor>/`: `<actor>.p12` (key + certificate chain, AES-256, random password
+generated on the cloud host in `ansible/.secrets`, never committed), `p12-password.txt`, `root_ca.crt` and
 `FIREFOX.txt`, a step-by-step guide with the URL and the root's fingerprint to check. One Firefox
 profile per identity (`firefox -P`) to be alice in one window and dev in another. Certificates live
 24 h: run `make client-certs` again and re-send the new `.p12`.
@@ -369,16 +377,16 @@ and imports the result with NSS's `pk12util` (Firefox's own crypto library). Liv
 ## The edges: the statements bot and the payment partner (stage 12)
 
 ```
- i5 netns zt-bot ──wg (own key, 10.10.0.3)──► gateway ─[≤5 new conn/s]─► frontend:8443 ─► … (statements)
- PayFlow (internet, no VPN) ─► i5 Wi-Fi:8444 ─DNAT─► gateway ─DNAT+SNAT─► frontend:8444 /webhook ─► core ─► ledger
+ cloud-host netns zt-bot ──wg (own key, 10.10.0.3)──► gateway ─[≤5 new conn/s]─► frontend:8443 ─► … (statements)
+ PayFlow (internet, no VPN) ─► cloud-host Wi-Fi:8444 ─DNAT─► gateway ─DNAT+SNAT─► frontend:8444 /webhook ─► core ─► ledger
 ```
 
-**The bot** (`tools/zt-bot.py`, `make bot-run`) lives in its own network namespace on the i5 whose
+**The bot** (`tools/zt-bot.py`, `make bot-run`) lives in its own network namespace on the cloud host whose
 only interface is its own WireGuard peer, routed to the frontend and nothing else. Its 1-hour
 certificate is **bound to that device** (`device: bot` in `policy.yaml`): the same certificate
 presented from any other tunnel address gets 403 — a stolen bot key is useless elsewhere. The bot
 renews by asking the admin's Ansible (`make bot-run` = `client-certs` + one run); it holds no
-standing credential to the CA, which stays unreachable from the i5.
+standing credential to the CA, which stays unreachable from the cloud host.
 
 **Rate limits**, from `policy.yaml`:
 - per identity at the frontend (`roles.<role>.rate_limit`: customer/staff 240/min, bot 20/min,
@@ -388,7 +396,7 @@ standing credential to the CA, which stays unreachable from the i5.
   even a compromised bot cannot flood the bank.
 
 **The partner** calls from the internet, without the VPN. One more port is published (8444,
-matched by interface name on the i5, never by address); the gateway translates it to the
+matched by interface name on the cloud host, never by address); the gateway translates it to the
 frontend's partner listener, which only ever sees the gateway's address and accepts only the
 partner's certificate and only `POST /webhook`. Each call is then checked in this order:
 
@@ -401,13 +409,13 @@ partner's certificate and only `POST /webhook`. Each call is then checked in thi
 | reference already credited | database (`bank.incoming`) | same values: 200 `replayed`, paid once; other values: 409 |
 | destination is a customer account, amount ≤ limit | core banking + database | 404 / 422 |
 
-The secret is generated on the i5 (`ansible/.secrets/partners/`, never committed, never logged) and
+The secret is generated on the cloud host (`ansible/.secrets/partners/`, never committed, never logged) and
 deployed to the frontend only (root:zt-app 0640). Money moves by double entry from the partner's
 settlement account (`ZTB-PAYFLOW-00`), audited with the partner's SPIFFE ID.
 
 Try it: `make pay TO=ZTB-ALICE-01 AMOUNT=10.00`, then the attacks:
 `python3 tools/payflow.py --to ZTB-ALICE-01 --amount 1 --replay` (or `--skew -900`, `--tamper`,
-`--wrong-secret`). From the i7 (no VPN needed): copy the partner's certificate, key, secret and the
+`--wrong-secret`). From the remote client (no VPN needed): copy the partner's certificate, key, secret and the
 root, and use `--url https://<entry_point>:8444/webhook`.
 
 Tests: offline, `tests/unit/test_partner.py` (webhook, replay, window, signature, roles re-checked,
