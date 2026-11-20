@@ -89,6 +89,7 @@
   ansible.builtin.slurp:
     src: "{{ step_path }}/config/ca.json"
   register: ca_json_raw
+  tags: [clients]        # also for `make client-certs`: a new actor's name must reach the CA first
 
 - name: Merge lifetime, TLS 1.3-only and the issuance policy into ca.json
   ansible.builtin.copy:
@@ -113,6 +114,7 @@
         minVersion: 1.3
         maxVersion: 1.3
   notify: Restart step-ca
+  tags: [clients]        # also for `make client-certs`: a new actor's name must reach the CA first
 
 # ------------------------------------------------------------------ service --
 - name: Database directory exists before start (systemd ReadWritePaths= requires it)
@@ -139,12 +141,14 @@
 
 - name: Apply config changes now
   ansible.builtin.meta: flush_handlers
+  tags: [clients]        # also for `make client-certs`: a new actor's name must reach the CA first
 
 - name: Wait for the CA on the mgmt address
   ansible.builtin.wait_for:
     host: "{{ zt_pki.ca.ip }}"
     port: "{{ zt_pki.ca.port }}"
     timeout: 60
+  tags: [clients]        # also for `make client-certs`: a new actor's name must reach the CA first
 
 # --------------------------------------------- export the trust anchor to i5 --
 - name: Root certificate fingerprint

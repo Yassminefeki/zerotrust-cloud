@@ -115,3 +115,16 @@ def test_bad_edge_policy_rejected(policy, mutate, msg):
     mutate(p)
     errs = gen_rules.validate_policy(p)
     assert any(msg in e for e in errs), errs
+
+
+def test_client_certs_refresh_the_ca_policy_first():
+    """`make client-certs` (--tags clients) must also push the CA's issuance policy, else a NEW
+    actor (stage 12: payflow) is refused: 'dns name "partner-payflow" not allowed'."""
+    import yaml
+    from unit_helpers import ROOT
+    tasks = yaml.safe_load((ROOT / "ansible/roles/ca/tasks/main.yml").read_text())
+    tagged = [t["name"] for t in tasks if "clients" in t.get("tags", [])]
+    assert tagged == ["Read the generated ca.json", "Merge lifetime, TLS 1.3-only and the issuance policy into ca.json",
+                      "Apply config changes now", "Wait for the CA on the mgmt address"]
+    certs = yaml.safe_load((ROOT / "ansible/certs.yml").read_text())
+    assert certs[0]["ansible.builtin.import_playbook"] == "ca.yml", "the CA play comes before the client play"
