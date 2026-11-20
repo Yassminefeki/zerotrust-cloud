@@ -77,7 +77,7 @@ class Ctx:
         self.iface = a.iface
         self.quick = a.quick
         self.minutes = a.minutes
-        self.poll = getattr(a, "poll", 5)
+        self.poll = getattr(a, "poll", 5) or 5
         self.actors = {}
         for actor, d in (("alice", a.alice), ("dev", a.dev)):
             d = Path(d).expanduser() if d else home() / "Downloads" / f"zt-{actor}"
@@ -457,6 +457,7 @@ def main():
     ap.add_argument("--iface", default="wg0")
     ap.add_argument("--quick", action="store_true", help="B1: ports 1-1024 + the bank's ports only")
     ap.add_argument("--minutes", type=float, default=10, help="B6: how long to wait for the revocation")
+    ap.add_argument("--poll", type=float, default=5, help="B6: seconds between two attempts")
     ap.add_argument("--report", default="remote-client-report.json")
     a = ap.parse_args()
     if a.list:

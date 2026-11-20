@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 revoke test-13 attacks attack attack-list audit demo up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 revoke test-13 attacks attack attack-list audit demo demo-captures up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -205,8 +205,13 @@ attack-list: venv  ## stage 13: the attack catalogue (what, who, which defence)
 audit: venv gen  ## stage 13: security audit (journals, drops, CRL, certificates, DB) in build/reports/audit.md
 	$(PY) tools/zt-audit.py --since '$(SINCE)'
 
-demo: venv gen client-certs  ## stage 13: narrated demo, with the remote client (DEMO_FAST=1, DEMO_REVOKE=0)
-	tools/zt-demo.sh
+SCENES ?=
+FAST   ?=
+demo: venv gen  ## stage 13: narrated demo, cloud host side (SCENES="C1 C2", FAST=1); remote side: remote-client/demo.py
+	$(PY) tools/demo.py $(if $(FAST),--fast) $(SCENES)
+
+demo-captures: venv  ## stage 13: demo transcripts -> PNG captures for the report (docs/screens/demo/)
+	$(PY) tools/render_captures.py $(BUILD)/demo/cloud-host
 
 # ----------------------------------------------------------------- pipeline --
 up: host infra ca firewall wireguard certs services bot  ## build everything, in the safe order

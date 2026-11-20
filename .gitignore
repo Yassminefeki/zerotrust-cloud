@@ -29,3 +29,6 @@ __pycache__/
 remote-client-report.json
 tests/artifacts/
 *.pcap
+
+# --- local Ansible collections cache ---
+.ansible/

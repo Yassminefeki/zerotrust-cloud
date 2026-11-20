@@ -1,5 +1,8 @@
 # zerotrust-cloud
 
+> **Documentation détaillée (FR)** : [`docs/`](docs/README.md) — analyse, architecture, reproduction pas à pas,
+> une fiche par partie, poste distant, tests, secrets, dépannage ; rapport : [`docs/rapport/rapport.pdf`](docs/rapport/rapport.pdf).
+
 Cloud side of a zero-trust mini-cloud: 6 KVM/libvirt VMs where only the
 declared caller reaches each service, every hop is encrypted (WireGuard, then
 mTLS with TLS 1.3), and the "who talks to whom" rule is written once in
