@@ -75,22 +75,32 @@ def test_keys_private_and_never_tracked():
 
 def test_templates_carry_no_key():
     for t in (BUILD / "wireguard").glob("*.j2"):
-        assert not re.search(r"(PrivateKey|PresharedKey) = [A-Za-z0-9+/]{43}=", t.read_text()), t
+        has_key = bool(re.search(r"(PrivateKey|PresharedKey) = [A-Za-z0-9+/]{43}=", t.read_text()))
+        assert not has_key, f"{t} contains a key"   # boolean: never print the file
 
 
 def test_i7_export(env):
-    """The ONLY thing produced for the i7: its wg0.conf, private, least privilege."""
+    """What is produced for each real peer: its wg0.conf, private, least privilege. The i7 dials
+    the i5's mDNS name; a peer living ON the i5 (netns, the stage 12 bot) dials the gateway directly.
+    Checks are booleans: a failure must never print the file, it holds the peer's keys."""
     real = [p for p in WG["peers"] if not p["test"]]
     for p in real:
         conf = EXPORT / p["name"] / "wg0.conf"
         text = conf.read_text()
-        assert oct(conf.stat().st_mode & 0o777) == "0o600"
-        assert f"Endpoint = {env['entry_point']}:{env['wan_port']}" in text, "endpoint must be the mDNS name"
-        assert re.search(r"^AllowedIPs = (.*)$", text, re.M).group(1).split(", ") == WG["reachable"]
-        assert f"Address = {p['ip']}/32" in text
-        assert f"PrivateKey = {key(p['name'], 'key')}" in text
-        assert f"PublicKey = {key(WG['server'], 'pub')}" in text
-        assert f"PresharedKey = {key(p['name'], 'psk')}" in text
+        endpoint = (f"{WG['endpoint_ip']}:{WG['port']}" if p.get("netns")
+                    else f"{env['entry_point']}:{env['wan_port']}")
+        checks = {
+            "private file (0600)": oct(conf.stat().st_mode & 0o777) == "0o600",
+            f"Endpoint = {endpoint}": f"Endpoint = {endpoint}" in text,
+            "AllowedIPs = what the tunnel may reach": (re.search(r"^AllowedIPs = (.*)$", text, re.M) or [None, ""])[1]
+                                                     .split(", ") == WG["reachable"],
+            f"Address = {p['ip']}/32": f"Address = {p['ip']}/32" in text,
+            "its own private key": f"PrivateKey = {key(p['name'], 'key')}" in text,
+            "the gateway's public key": f"PublicKey = {key(WG['server'], 'pub')}" in text,
+            "its own pre-shared key": f"PresharedKey = {key(p['name'], 'psk')}" in text,
+        }
+        failed = [k for k, ok in checks.items() if not ok]
+        assert not failed, f"{conf}: {failed}"
 
 
 # --------------------------------------------------------------- gateway --

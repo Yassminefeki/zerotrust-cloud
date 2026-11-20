@@ -234,11 +234,13 @@ def test_partner_secret_only_on_the_frontend(vm):
     secret = (SECRETS / "partners/payflow.key").read_text().strip()
     f = vm(frontend_node()).file("/etc/zt/partners/payflow.key")
     assert (f.user, f.group, f.mode) == ("root", "zt-app", 0o640)
-    assert f.content_string.strip() == secret
+    same = f.content_string.strip() == secret          # booleans: a failure must not print the secret
+    assert same, "deployed secret differs from ansible/.secrets/partners/payflow.key"
     for node in ("service-a", "service-b", "database"):
         assert not vm(node).file("/etc/zt/partners").exists
     logs = vm(frontend_node()).check_output("journalctl -u zt-mtls --since '-2h' --no-pager")
-    assert secret not in logs
+    leaked = secret in logs
+    assert not leaked, "the webhook secret appears in the frontend's journal"
     tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
     assert "partners/" not in tracked
 
