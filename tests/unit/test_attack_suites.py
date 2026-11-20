@@ -240,3 +240,32 @@ def test_remote_checks_skip_cleanly_without_tunnel_or_files():
     assert res.verdict == "SKIPPED"
     res = play("B3")
     assert res.verdict == "SKIPPED"                    # not root (or no wg) here
+    for check in ("B1", "B5"):                         # the cloud host's name does not resolve
+        assert play(check, cloud_host="no-such-host.invalid").verdict == "SKIPPED"
+
+
+def test_remote_report_accumulates_runs(tmp_path, monkeypatch):
+    """B3 (sudo) and B6 (with the cloud host) are separate runs: one report keeps every check, and
+    an interrupted re-run never erases a real result."""
+    rep = tmp_path / "r.json"
+    verdicts = {"B4": "DEFENDED"}
+
+    def fake(cid):
+        def run(ctx, res):
+            if verdicts.get(cid) == "DEFENDED":
+                res.probe("x", True, "refused")
+            else:
+                res.skip("interrupted")
+        return run
+    monkeypatch.setattr(attack, "RUN", {c: fake(c) for c in attack.CHECKS})
+    c = ctx()
+    monkeypatch.setattr(attack, "Ctx", lambda a: c)
+    for argv in (["B4"], ["B6"]):
+        monkeypatch.setattr(sys, "argv", ["attack.py", *argv, "--report", str(rep)])
+        attack.main()
+    got = {x["id"]: x["verdict"] for x in json.loads(rep.read_text())["results"]}
+    assert got == {"B4": "DEFENDED", "B6": "SKIPPED"}
+    verdicts["B4"] = "SKIPPED"                       # B4 interrupted this time: keep the real result
+    monkeypatch.setattr(sys, "argv", ["attack.py", "B4", "--report", str(rep)])
+    attack.main()
+    assert json.loads(rep.read_text())["results"][0]["verdict"] == "DEFENDED"

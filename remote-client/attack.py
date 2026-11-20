@@ -246,7 +246,7 @@ def b1(ctx, res):
     try:
         ip = socket.gethostbyname(ctx.cloud_host)
     except OSError:
-        return res.skip(f"{ctx.cloud_host} does not resolve: --cloud-host NAME_OR_ADDRESS")
+        return res.skip(f"{ctx.cloud_host} does not resolve: --cloud-host <the cloud host's Wi-Fi address>")
     ports = list(range(1, 1025)) + ctx.inside_ports + [ctx.partner_port] if ctx.quick else list(range(1, 65536))
     ports = sorted(set(ports))
     print(f"   scanning {len(ports)} TCP ports of {ctx.cloud_host} ({ip}) from outside the tunnel...")
@@ -365,7 +365,11 @@ def b4(ctx, res):
 
 def b5(ctx, res):
     host, port = ctx.cloud_host, ctx.partner_port
-    if tcp(socket.gethostbyname(host), port) != "open":
+    try:
+        ip = socket.gethostbyname(host)
+    except OSError:
+        return res.skip(f"{host} does not resolve: --cloud-host <the cloud host's Wi-Fi address>")
+    if tcp(ip, port) != "open":
         return res.skip(f"{host}:{port} does not answer (partner port forwarding off?)")
     before = None
     if "alice" in ctx.actors and tunnel_up(ctx):
@@ -446,8 +450,20 @@ def main():
     print("\n================ summary ================")
     for r in results:
         print(f"  {r.id}  {r.verdict:9} {r.title}")
-    report = {"when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-              "machine": socket.gethostname(), "results": [r.as_dict() for r in results]}
+    # one report for the whole session: each run updates its own checks, the others are kept
+    # (B3 needs sudo and B6 needs the cloud host, so they are usually separate runs)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    previous = {}
+    try:
+        previous = {x["id"]: x for x in json.loads(Path(a.report).read_text()).get("results", [])}
+    except (OSError, ValueError):
+        pass
+    for r in results:
+        if r.verdict == "SKIPPED" and previous.get(r.id, {}).get("verdict") not in (None, "SKIPPED"):
+            continue                       # an interrupted re-run does not erase a real result
+        previous[r.id] = {**r.as_dict(), "when": now}
+    report = {"when": now, "machine": socket.gethostname(),
+              "results": [previous[k] for k in sorted(previous, key=lambda c: int(c[1:]))]}
     Path(a.report).write_text(json.dumps(report, indent=1))
     if os.environ.get("SUDO_UID"):
         os.chown(a.report, int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"]))
