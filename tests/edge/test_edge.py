@@ -78,7 +78,7 @@ def now(h):
 def test_bot_namespace_has_only_its_tunnel(bot):
     links = run(["ip", "-n", bot, "-br", "link"], sudo=True, check=True).stdout.split("\n")
     assert sorted(l.split()[0] for l in links if l.strip()) == ["lo", f"wg-{bot}"]
-    routes = [l for l in run(["ip", "-n", bot, "route"], sudo=True, check=True).stdout.split("\n") if l.strip()]
+    routes = [l.strip() for l in run(["ip", "-n", bot, "route"], sudo=True, check=True).stdout.split("\n") if l.strip()]
     assert routes == [f"10.20.0.10 dev wg-{bot} scope link"], "a real client: the frontend only"
 
 
