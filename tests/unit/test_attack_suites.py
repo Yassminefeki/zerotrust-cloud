@@ -269,3 +269,30 @@ def test_remote_report_accumulates_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["attack.py", "B4", "--report", str(rep)])
     attack.main()
     assert json.loads(rep.read_text())["results"][0]["verdict"] == "DEFENDED"
+
+
+def test_b1_recognises_bank_services_by_their_certificate(remote):
+    """A port is a bank service only if it presents a certificate from the bank's CA: the
+    frontend does (even though it then demands a client certificate); a plain listener or a
+    TLS server with another CA does not, whatever its port number."""
+    ip, port = remote["web_ip"], remote["web_port"]
+    assert attack.bank_tls(ip, port, remote["root"]) is True
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    try:
+        assert attack.bank_tls("127.0.0.1", srv.getsockname()[1], remote["root"], timeout=1) is False
+    finally:
+        srv.close()
+
+
+def test_b1_against_the_real_services(remote):
+    """Scan the local frontend address: its port is the bank's -> BREACH unless it is the partner
+    port; declared as the partner port -> DEFENDED."""
+    port = remote["web_port"]
+    over = {**remote, "cloud_host": remote["web_ip"], "quick": True, "inside_ports": [port]}
+    over["partner_port"] = 1
+    assert play("B1", **over).verdict == "BREACH"
+    over["partner_port"] = port
+    res = play("B1", **over)
+    assert res.verdict == "DEFENDED", res.as_dict()

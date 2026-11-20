@@ -18,14 +18,14 @@ Certificates live 24 h: ask for a fresh export if they expired. Elsewhere? `--al
 
 ```bash
 python3 remote-client/attack.py --list
-python3 remote-client/attack.py                 # B1 B2 B4 B5 (about 2 minutes, B1 scans 65535 ports)
+python3 remote-client/attack.py --cloud-host <cloud host Wi-Fi address>   # B1 B2 B4 B5 (B1 scans 65535 ports)
 python3 remote-client/attack.py --quick         # B1 scans only 1-1024 + the bank's ports
 sudo python3 remote-client/attack.py B3         # lateral movement + address spoofing (needs root)
 ```
 
 | | What you try | Expected |
 |---|---|---|
-| B1 | scan every TCP port of the cloud host from the Wi-Fi (outside the tunnel) | no bank-internal port; only the partner API 8444 (WireGuard is UDP and never answers a scan) |
+| B1 | scan every TCP port of the cloud host from the Wi-Fi (outside the tunnel), then ask each open port for its certificate | only the partner API 8444 presents the bank's certificate; other open ports are the cloud host's own services, listed (WireGuard is UDP and never answers a scan) |
 | B2 | the website with no certificate, with self-signed certificates claiming Alice / Dev, and TLS 1.2 | handshake refused every time |
 | B3 | route **every** bank network into your tunnel and knock on the inside (DB, services, CA, SSH); then spoof another VPN client's address | silence: the gateway alone stops you |
 | B4 | as Alice: read Bob's history, pay from Bob's account, forge identity headers, staff/bot routes, cross-site POSTs; as Dev: customer data | 404 / 403 / 415, your own accounts only |

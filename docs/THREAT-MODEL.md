@@ -73,8 +73,12 @@ certificate from our CA *and* on the receiver's allow-list, then the route's rol
    it), or token exchange so the inner services see the user's own credential.
 2. **The cloud host is the root of everything.** It holds the actors' keys, the WireGuard keys, the
    PayFlow secret and SSH access to every VM; it is the hypervisor. Whoever owns it owns the bank.
-   Its own services on the Wi-Fi (e.g. its SSH) are outside the bank's policy: B1 lists them.
-   Mitigations: full-disk encryption, a hardware token for SSH, keys in a vault/HSM.
+   Its own services on the Wi-Fi are outside the bank's policy, and B1 from the remote client found
+   many (SSH and a dozen development services: databases, web apps, a model server…). None presents
+   the bank's certificate, none reaches the VMs, but each is a way into the machine that holds every
+   key. Mitigations: a host firewall that drops the Wi-Fi except WireGuard and the partner port (or
+   bind those services to 127.0.0.1), full-disk encryption, a hardware token for SSH, keys in a
+   vault/HSM.
 3. **The CA VM.** Its root and intermediate keys are on its disk (encrypted, with the password
    on the same VM). Compromise = any identity of the policy can be minted. Mitigations: take the
    root key offline after `make ca`, HSM / KMS for the intermediate; short lifetimes (already 24 h)

@@ -240,6 +240,25 @@ def need_alice(ctx, res):
 
 
 # ------------------------------------------------------------------- checks --
+def bank_tls(ip, port, root, timeout=3):
+    """Does this port present a certificate signed by the BANK's CA? (= a bank service)
+    In TLS 1.3 the client checks the server's certificate first; a server that then demands a
+    client certificate still proves who it is. A certificate from another CA, or no TLS: not ours."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.load_verify_locations(root)
+    try:
+        with socket.create_connection((ip, port), timeout) as s, ctx.wrap_socket(s) as t:
+            t.version()
+        return True
+    except ssl.SSLCertVerificationError:
+        return False
+    except ssl.SSLError as e:
+        return "CERTIFICATE_REQUIRED" in str(e).upper()
+    except OSError:
+        return False
+
+
 def b1(ctx, res):
     import asyncio
     from port_scan import raise_nofile, scan
@@ -247,6 +266,8 @@ def b1(ctx, res):
         ip = socket.gethostbyname(ctx.cloud_host)
     except OSError:
         return res.skip(f"{ctx.cloud_host} does not resolve: --cloud-host <the cloud host's Wi-Fi address>")
+    if not ctx.root:
+        return res.skip("needs the bank's root_ca.crt (in Alice's or Dev's folder) to recognise bank services")
     ports = list(range(1, 1025)) + ctx.inside_ports + [ctx.partner_port] if ctx.quick else list(range(1, 65536))
     ports = sorted(set(ports))
     print(f"   scanning {len(ports)} TCP ports of {ctx.cloud_host} ({ip}) from outside the tunnel...")
@@ -254,15 +275,26 @@ def b1(ctx, res):
     v = asyncio.run(scan(ip, ports, 1.5, min(2000, raise_nofile() - 64)))
     open_ = sorted(p for p, s in v.items() if s == "open")
     res.note(f"{len(ports)} ports in {time.time() - t0:.0f} s; open: {open_ or 'none'}")
-    for p in ctx.inside_ports:
-        res.probe(f"bank-internal port {p}/tcp on the cloud host from the Wi-Fi", p not in open_,
-                  "closed" if p not in open_ else "OPEN: an internal service is exposed to the Wi-Fi")
-    res.note(f"partner API {ctx.partner_port}/tcp: " + ("published, mTLS-protected (B5)" if ctx.partner_port in open_
-                                                         else "not reachable (port forwarding off?)"))
-    others = [p for p in open_ if p not in ctx.inside_ports and p != ctx.partner_port]
-    if others:
-        res.note(f"other open ports {others}: the cloud host's OWN services (not the bank's); "
-                 "review them in docs/THREAT-MODEL.md, 'the cloud host'")
+    with ThreadPoolExecutor(16) as ex:
+        bank = dict(zip(open_, ex.map(lambda p: bank_tls(ip, p, ctx.root), open_)))
+    for p in open_:
+        if p == ctx.partner_port:
+            continue
+        res.probe(f"port {p}/tcp open on the Wi-Fi: is it a bank service?", not bank[p],
+                  "BANK CERTIFICATE: a bank service is exposed to the Wi-Fi" if bank[p]
+                  else "no: not signed by the bank's CA (one of the cloud host's own services)")
+    if ctx.partner_port in open_:
+        res.note(f"partner API {ctx.partner_port}/tcp: published on purpose"
+                 + (", presents the bank's certificate, mTLS-protected (B5)" if bank[ctx.partner_port] else
+                    " but does NOT present the bank's certificate: check the port forwarding"))
+    else:
+        res.note(f"partner API {ctx.partner_port}/tcp: not reachable (port forwarding off?)")
+    own = [p for p in open_ if p != ctx.partner_port and not bank[p]]
+    if own:
+        res.note(f"the cloud host's OWN services reachable from the Wi-Fi: {own}. Not the bank's, but anyone "
+                 "on this Wi-Fi reaches them: see docs/THREAT-MODEL.md, residual risk 2")
+    if not open_ or open_ == [ctx.partner_port]:
+        res.probe("only the partner API answers from the Wi-Fi", True, f"open: {open_}")
     res.note("WireGuard (UDP 51820) is invisible to a scan: it never answers a packet without a valid key")
 
 
