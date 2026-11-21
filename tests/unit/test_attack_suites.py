@@ -114,6 +114,9 @@ def test_runner_end_to_end(tmp_path, monkeypatch):
     assert "❌ BREACH" in md and "the door was open" in md and "✅ DEFENDED" in md
     monkeypatch.setattr(sys, "argv", ["zt-attack.py", "--only", "1", "-q"])
     assert runner.main() == 0
+    # the partial run has its own report; the full one is untouched
+    assert (tmp_path / "reports/attacks-A1.json").exists()
+    assert len(json.loads((tmp_path / "reports/attacks.json").read_text())["attacks"]) == 3
 
 
 def test_runner_rejects_unknown_attacks():

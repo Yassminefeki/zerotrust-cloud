@@ -296,7 +296,7 @@ def render(data):
         md += ["_no attack report yet: `make attacks`_", ""]
     r = data.get("remote-client-report.json")
     if r:
-        md += [f"Remote client ({r.get('machine', '?')}, {r['when']}):", ""]
+        md += [f"Remote client (remote-client, {r['when']}):", ""]
         md += table(["", "attack", "verdict"], [(x["id"], x["title"], x["verdict"]) for x in r["results"]])
         findings += [f"remote attack {x['id']}: BREACH" for x in r["results"] if x["verdict"] == "BREACH"]
     else:

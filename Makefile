@@ -13,7 +13,7 @@ TF      := terraform -chdir=terraform
 TFVARS  := -var-file=../$(BUILD)/terraform.tfvars.json
 ANSIBLE := cd $(CURDIR)/ansible &&
 
-.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 revoke test-13 attacks attack attack-list audit demo demo-captures up test destroy clean
+.PHONY: help venv env gen check test-0 galaxy host test-1 infra image wait recreate-vms test-2 ca test-3 firewall test-4 wireguard test-peer test-peer-down test-5 certs client-certs test-6 services test-7 test-8 test-9 test-10 test-11 bot bot-down bot-run pay test-12 revoke test-13 attacks attack attack-list audit demo demo-captures evidence infra-view infra-live dashboard up test destroy clean
 
 help:  ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -209,6 +209,18 @@ SCENES ?=
 FAST   ?=
 demo: venv gen  ## stage 13: narrated demo, cloud host side (SCENES="C1 C2", FAST=1); remote side: remote-client/demo.py
 	$(PY) tools/demo.py $(if $(FAST),--fast) $(SCENES)
+
+infra-view: venv gen  ## stage 13: live view of the infrastructure (VIEW=map|vms|nets|wg|conns|drops, WATCH=2)
+	$(PY) tools/infra-view.py $(or $(VIEW),map) $(if $(WATCH),--watch $(WATCH))
+
+infra-live: venv gen  ## stage 13: GRAPHICAL live map of the infrastructure at http://127.0.0.1:8099
+	$(PY) tools/infra-live.py
+
+dashboard: venv gen  ## stage 13: live dashboard in tmux (map, connections, tunnel, drops)
+	tools/infra-dashboard.sh
+
+evidence: venv  ## copy the measured results (attacks, audit, drift, remote client) into docs/evidence/, anonymised
+	$(PY) tools/collect-evidence.py
 
 demo-captures: venv  ## stage 13: demo transcripts -> PNG captures for the report (docs/screens/demo/)
 	$(PY) tools/render_captures.py $(BUILD)/demo/cloud-host

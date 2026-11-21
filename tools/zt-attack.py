@@ -119,8 +119,10 @@ def report(cat, chosen, cases, seconds):
     md += ["", "Remote client (B1–B6): played from the remote client with `remote-client/attack.py`; its",
            "report (`remote-client-report.json`) can be dropped in `build/reports/` and is summarised by `make audit`.", ""]
     REPORTS.mkdir(parents=True, exist_ok=True)
-    (REPORTS / "attacks.md").write_text("\n".join(md))
-    (REPORTS / "attacks.json").write_text(json.dumps({"when": when, "attacks": out}, indent=1))
+    # a partial run (make attack A=...) never overwrites the full catalogue report
+    name = "attacks" if list(chosen) == list(cat) else "attacks-" + "-".join(chosen)
+    (REPORTS / f"{name}.md").write_text("\n".join(md))
+    (REPORTS / f"{name}.json").write_text(json.dumps({"when": when, "attacks": out}, indent=1))
     return rows
 
 
@@ -139,7 +141,7 @@ def main():
     ids = list(dict.fromkeys(ref for x in chosen for ref in cat[x]["tests"]))
     rc, cases, seconds = run(ids, a.pytest_args)
     rows = report(cat, chosen, cases, seconds)
-    print("\n================ attack report (build/reports/attacks.md) ================")
+    print("\n================ attack report (build/reports/) ================")
     for x, spec, v, res, missing in rows:
         print(f"  {x:4} {v:11} {spec['title']}")
     bad = [x for x, _, v, _, _ in rows if v != "DEFENDED"]

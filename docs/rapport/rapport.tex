@@ -484,6 +484,21 @@ C8 & audit & R8 & nouveau certificat importé dans Firefox\\
 \end{tabularx}
 \end{center}
 
+\subsection{L'infrastructure, en direct}
+Ces captures montrent le système réel en fonctionnement : les VM dans le gestionnaire de
+virtualisation, leur position sur les réseaux lue dans libvirt, les flux actifs lus sur chaque VM,
+le tunnel vu du gateway et le trafic chiffré capturé sur un pont (outil \cmd{tools/infra-view.py},
+guide : \cmd{docs/25-capturer-l-infrastructure.md}).
+\capture[0.85]{infra-virt-manager-vms.png}{Les six VM en fonctionnement (virt-manager).}
+\capture[0.85]{infra-virt-manager-reseaux.png}{Les réseaux virtuels : wan en NAT, les autres isolés.}
+\capture[0.85]{infra-virt-manager-nic-frontend.png}{Le frontend : une interface sur dmz, une sur app, une sur mgmt.}
+\capture{infra-carte-graphique.png}{Carte graphique en direct (navigateur) : VM, réseaux, tunnel, flux actifs animés et paquets rejetés, lus sur le système réel.}
+\capture{infra-carte-vivante.png}{Carte vivante : VM, tunnel et flux actifs pendant qu'Alice utilise la banque.}
+\capture{infra-vms.png}{Chaque VM et ses réseaux, lus dans libvirt.}
+\capture{infra-connexions.png}{Les connexions établies, de bout en bout : tunnel → frontend → service-a → service-b → base.}
+\capture{infra-tableau-de-bord.png}{Tableau de bord en direct : carte, connexions, tunnel, rejets du pare-feu.}
+\capture[0.85]{infra-wireshark-tls13.png}{Trafic capturé sur le pont app : uniquement du TLS 1.3 chiffré.}
+
 \subsection{Le poste distant : l'utilisateur}
 \capture[0.8]{firefox-alice-comptes.png}{R2 — Alice dans Firefox : ses comptes, sans écran de connexion.}
 \capture[0.8]{firefox-alice-virement.png}{R2 — Un virement vers Bob ; la description \texttt{<script>} reste du texte.}

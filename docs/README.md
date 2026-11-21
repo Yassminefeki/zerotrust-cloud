@@ -1,5 +1,7 @@
 # Documentation — zerotrust-cloud / ZT Bank
 
+> **English documentation**: [architecture](architecture.md) · [deployment](deployment.md) · one document per service (see the [README](../README.md#documentation)) · [security](security.md) · [testing](testing.md) · [high availability](high-availability.md) · [evidence](evidence/).
+
 Mini-cloud **zero trust** sur un seul ordinateur portable : 6 machines virtuelles, une banque
 de démonstration (« ZT Bank ») et un second poste qui l'utilise à travers un tunnel WireGuard.
 Chaque règle (« qui parle à qui ») est écrite **une seule fois** dans `policy.yaml`, puis
@@ -18,9 +20,11 @@ générée en configuration (pare-feu, mTLS, certificats, base de données) et *
 | publier sans rien exposer | [21 — Secrets et données personnelles](21-secrets-et-donnees-personnelles.md) |
 | un problème | [22 — Dépannage](22-depannage.md) |
 | les risques résiduels | [THREAT-MODEL.md](THREAT-MODEL.md) (modèle de menace, en anglais) |
+| la référence détaillée étape par étape (anglais) | [STAGES.md](STAGES.md) |
 | le rapport | [rapport/rapport.pdf](rapport/rapport.pdf) (source LaTeX : `rapport/rapport.tex`) |
 | la vidéo de démo | [video/zt-bank-demo.mp4](video/zt-bank-demo.mp4) — narration et guide d'enregistrement : [23](23-video-demo.md) |
 | **filmer la démo sur les deux machines** | [24 — Scénario de la démo](24-scenario-demo.md) (scripts `tools/demo.py` et `remote-client/demo.py`) |
+| capturer les VM, réseaux et connexions **en direct** | [25 — Capturer l'infrastructure](25-capturer-l-infrastructure.md) (`tools/infra-view.py`, tableau de bord) |
 
 ## Les fiches, dans l'ordre de construction
 

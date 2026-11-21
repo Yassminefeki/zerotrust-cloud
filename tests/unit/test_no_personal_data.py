@@ -10,7 +10,7 @@ from unit_helpers import ROOT
 PATTERNS = {
     "home directory of a user": re.compile(r"/home/(?!<|user\b|\$|ubuntu\b)[a-z][a-z0-9._-]+"),
     "MAC address": re.compile(r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b", re.I),
-    "e-mail address": re.compile(r"\b[\w.+-]+@(?!example\.|anthropic\.com)[\w-]+\.[a-z]{2,}\b", re.I),
+    "e-mail address": re.compile(r"\b[\w.+-]+@(?!example\.|anthropic\.com)[\w-]+\.(?!(?:service|timer|socket|target|mount|path)\b)[a-z]{2,}\b", re.I),
     "private key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     "WireGuard key value": re.compile(r"(?:PrivateKey|PresharedKey)\s*=\s*[A-Za-z0-9+/]{42}[A-Za-z0-9+/=]{2}"),
     "home-LAN address": re.compile(r"\b(?:192\.168\.(?!122\.)\d{1,3}|10\.(?!(?:10|20|30|40|50)\.0\.)\d{1,3}\.\d{1,3})\.\d{1,3}\b"),
