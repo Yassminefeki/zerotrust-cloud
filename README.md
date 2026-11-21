@@ -176,10 +176,3 @@ Generated at run time and never committed: `build/` (configurations, exports, re
 | [docs/screens/](docs/screens/) | screenshots of the website (fictional demo data) |
 | [remote-client/README.md](remote-client/README.md) | remote client attack suite |
 
-## License
-
-No license has been chosen yet: TODO[decide]: add a `LICENSE` file (for example MIT or Apache-2.0)
-and update this section; until then the authors retain all rights. Ubuntu, WireGuard, PostgreSQL,
-Terraform, Ansible and the other names and logos shown in the badges are trademarks of their
-respective owners; the badges are served by shields.io with Simple Icons. The bank, its customers and
-all amounts are fictional.
